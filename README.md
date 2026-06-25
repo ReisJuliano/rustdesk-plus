@@ -119,7 +119,7 @@ O gateway Nginx (incluído no Compose) roteia:
 ### Via script (recomendado)
 
 ```bash
-git clone https://github.com/seu-usuario/rustdesk-plus.git
+git clone https://github.com/ReisJuliano/rustdesk-plus.git
 cd rustdesk-plus
 chmod +x install.sh
 ./install.sh
@@ -139,7 +139,7 @@ Ao final, acesse a URL exibida no terminal. O **primeiro acesso** abre o wizard 
 ### Manual (passo a passo)
 
 ```bash
-git clone https://github.com/seu-usuario/rustdesk-plus.git
+git clone https://github.com/ReisJuliano/rustdesk-plus.git
 cd rustdesk-plus
 
 # Crie o arquivo de configuracao

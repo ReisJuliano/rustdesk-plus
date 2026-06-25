@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   listBranches, listDevices, setDeviceBranch, toggleFavorite,
   deleteDevice, patchDevice, listTags, listDeviceTags, addDeviceTag, removeDeviceTag,
-  getAllDeviceTags,
+  getAllDeviceTags, getServerConfig,
   type Branch, type Device, type Tag, type DeviceTagRow,
 } from "@/lib/api";
 
@@ -18,9 +18,10 @@ function isNumericId(id: string) {
   return /^\d+$/.test(id.trim());
 }
 
-function connectDevice(id: string) {
+function connectDevice(id: string, password?: string) {
   if (isNumericId(id)) {
-    window.open(`rustdesk://${id}`, "_blank");
+    const uri = password ? `rustdesk://${id}?password=${encodeURIComponent(password)}` : `rustdesk://${id}`;
+    window.open(uri, "_blank");
   }
   // IDs não numéricos (agent:HOSTNAME) são placeholders temporários.
   // O RustDesk substituirá automaticamente quando enviar o heartbeat.
@@ -112,9 +113,9 @@ function CopyBtn({ text }: { text: string }) {
 // ── Modal de detalhes ─────────────────────────────────────────────────────────
 
 function DeviceModal({
-  device, branches, onClose, onRefresh,
+  device, branches, password, onClose, onRefresh,
 }: {
-  device: Device; branches: Branch[]; onClose: () => void; onRefresh: () => void;
+  device: Device; branches: Branch[]; password: string; onClose: () => void; onRefresh: () => void;
 }) {
   const [alias, setAlias] = useState(device.alias ?? "");
   const [description, setDescription] = useState(device.description ?? "");
@@ -297,6 +298,13 @@ function DeviceModal({
         </div>
 
         {/* Actions */}
+        {password && isNumericId(device.rustdesk_id) && (
+          <div className="px-6 pb-2 flex items-center gap-2">
+            <span className="text-xs text-slate-400">Senha:</span>
+            <span className="font-mono text-xs font-bold text-slate-700 tracking-widest bg-slate-50 border border-slate-200 rounded-lg px-2 py-0.5 select-all">{password}</span>
+            <CopyBtn text={password} />
+          </div>
+        )}
         <div className="px-6 pb-5 flex gap-2">
           <button
             onClick={onFavorite}
@@ -312,7 +320,7 @@ function DeviceModal({
             {device.favorite ? "Favorito" : "Favoritar"}
           </button>
           <button
-            onClick={() => connectDevice(device.rustdesk_id)}
+            onClick={() => connectDevice(device.rustdesk_id, password)}
             disabled={!isNumericId(device.rustdesk_id)}
             title={!isNumericId(device.rustdesk_id) ? "Aguardando ID do RustDesk..." : undefined}
             className="flex-1 bg-blue-600 hover:bg-blue-700 text-white rounded-xl px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -345,9 +353,9 @@ function DeviceModal({
 // ── Card ─────────────────────────────────────────────────────────────────────
 
 function DeviceCard({
-  device, branches, tags, onRefresh, onClick,
+  device, branches, tags, password, onRefresh, onClick,
 }: {
-  device: Device; branches: Branch[]; tags: Tag[]; onRefresh: () => void; onClick: () => void;
+  device: Device; branches: Branch[]; tags: Tag[]; password: string; onRefresh: () => void; onClick: () => void;
 }) {
   async function onToggleFav(e: React.MouseEvent) {
     e.stopPropagation();
@@ -437,7 +445,7 @@ function DeviceCard({
       {/* Actions */}
       <div className="flex gap-2 px-3 pb-3 mt-3">
         <button
-          onClick={(e) => { e.stopPropagation(); connectDevice(device.rustdesk_id); }}
+          onClick={(e) => { e.stopPropagation(); connectDevice(device.rustdesk_id, password); }}
           disabled={!isNumericId(device.rustdesk_id)}
           title={!isNumericId(device.rustdesk_id) ? "Aguardando ID do RustDesk..." : undefined}
           className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-xl py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -476,6 +484,7 @@ export default function DevicesPage() {
   const [selected, setSelected] = useState<Device | null>(null);
   const [deviceTagMap, setDeviceTagMap] = useState<Map<string, Tag[]>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const [rdPassword, setRdPassword] = useState("");
 
   async function load() {
     try {
@@ -514,6 +523,10 @@ export default function DevicesPage() {
   }
 
   useEffect(() => {
+    getServerConfig().then((cfg) => setRdPassword(cfg.rustdesk_password ?? "")).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     load();
     const iv = setInterval(load, 10000);
     return () => clearInterval(iv);
@@ -528,6 +541,7 @@ export default function DevicesPage() {
         <DeviceModal
           device={selected}
           branches={branches}
+          password={rdPassword}
           onClose={() => setSelected(null)}
           onRefresh={() => { load(); setSelected(null); }}
         />
@@ -625,7 +639,7 @@ export default function DevicesPage() {
             {viewMode === "grid" && (
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-4">
                 {devices.map((d) => (
-                  <DeviceCard key={d.id} device={d} branches={branches} tags={deviceTagMap.get(d.id) ?? []} onRefresh={load} onClick={() => setSelected(d)} />
+                  <DeviceCard key={d.id} device={d} branches={branches} tags={deviceTagMap.get(d.id) ?? []} password={rdPassword} onRefresh={load} onClick={() => setSelected(d)} />
                 ))}
               </div>
             )}
@@ -669,7 +683,7 @@ export default function DevicesPage() {
                           <td className="px-4 py-2.5 text-xs text-slate-400">{fmtLastSeen(d.last_seen_at)}</td>
                           <td className="px-4 py-2.5">
                             <button
-                              onClick={(e) => { e.stopPropagation(); connectDevice(d.rustdesk_id); }}
+                              onClick={(e) => { e.stopPropagation(); connectDevice(d.rustdesk_id, rdPassword); }}
                               disabled={!isNumericId(d.rustdesk_id)}
                               title={!isNumericId(d.rustdesk_id) ? "Aguardando ID do RustDesk..." : undefined}
                               className="text-xs text-blue-600 hover:underline disabled:text-slate-300 disabled:cursor-not-allowed"

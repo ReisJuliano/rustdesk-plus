@@ -77,6 +77,7 @@ export type ServerConfig = {
   server_ip: string;
   server_key: string;
   api_url: string;
+  rustdesk_password: string;
 };
 
 export type SetupStatus = ServerConfig & {

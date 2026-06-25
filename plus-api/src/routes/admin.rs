@@ -591,12 +591,14 @@ async fn save_server_config(
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
 
+    let existing = crate::config::load(&state.db).await?;
     crate::config::save(
         &state.db,
         &ServerConfig {
             server_ip: body.server_ip,
             server_key: body.server_key,
             api_url: body.api_url,
+            rustdesk_password: body.rustdesk_password.unwrap_or(existing.rustdesk_password),
         },
     )
     .await?;

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -24,9 +25,10 @@ import (
 
 // ── Config injetado em build ──────────────────────────────────────────────────
 var (
-	serverIP  = ""
-	serverKey = ""
-	apiURL    = ""
+	serverIP           = ""
+	serverKey          = ""
+	apiURL             = ""
+	unattendedPassword = ""
 )
 
 const rustdeskDownload = "https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-x86_64.exe"
@@ -384,7 +386,10 @@ func runInstall(hwnd uintptr) {
 		_PostMessageW.Call(hwnd, WM_APP_ERROR, 0, uintptr(unsafe.Pointer(p)))
 	}
 
-	status("Verificando instalação do RustDesk...", 5)
+	// Para qualquer instância existente ANTES de mexer em qualquer arquivo de configuração.
+	// O serviço roda como SYSTEM; se não parar agora, o novo config será ignorado.
+	status("Parando RustDesk existente...", 5)
+	stopRustDeskProcesses()
 
 	if _, err := os.Stat(rustdeskExe); os.IsNotExist(err) {
 		status("Baixando RustDesk (pode demorar)...", 10)
@@ -400,9 +405,8 @@ func runInstall(hwnd uintptr) {
 		if err := cmd.Run(); err != nil {
 			fail("Falha na instalação: " + err.Error()); return
 		}
-	} else {
-		status("RustDesk já instalado.", 30)
-		exec.Command("taskkill", "/F", "/IM", "rustdesk.exe").Run()
+		// Mata o RustDesk que o instalador pode ter abierto, e reaplica parada
+		stopRustDeskProcesses()
 	}
 
 	status("Aplicando configuração do servidor...", 70)
@@ -428,10 +432,25 @@ func runInstall(hwnd uintptr) {
 		fail("Erro ao aplicar a configuração no RustDesk: " + err.Error()); return
 	}
 
+	if unattendedPassword != "" {
+		status("Configurando senha de acesso remoto...", 76)
+		if err := setRustDeskPassword(unattendedPassword); err != nil {
+			fail("Erro ao definir a senha: " + err.Error()); return
+		}
+	}
+
+	// Copia toda a config do perfil do usuário atual para o perfil SYSTEM,
+	// pois o serviço do Windows roda como SYSTEM e leria o config antigo.
+	status("Propagando configuração para o serviço...", 80)
+	propagateConfigToSystemProfile()
+
 	status("Instalando agente de gerenciamento...", 82)
 	if err := installAgent(); err != nil {
 		fail("Erro ao instalar o agente: " + err.Error()); return
 	}
+
+	status("Configurando serviço de inicialização...", 90)
+	installRustDeskService()
 
 	status("Iniciando RustDesk...", 95)
 	exec.Command(rustdeskExe).Start()
@@ -458,6 +477,79 @@ func applyRustDeskOptions() error {
 		}
 	}
 	return nil
+}
+
+func stopRustDeskProcesses() {
+	// Para o serviço (pode falhar se não existir — ignoramos)
+	svcStop := exec.Command("sc", "stop", "RustDesk")
+	svcStop.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	svcStop.Run()
+	// Mata o processo de UI
+	kill := exec.Command("taskkill", "/F", "/IM", "rustdesk.exe")
+	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	kill.Run()
+	// Aguarda os processos terminarem de fato antes de mexer nos arquivos
+	time.Sleep(1500 * time.Millisecond)
+}
+
+// propagateConfigToSystemProfile copia os arquivos de configuração do perfil
+// do usuário atual para o perfil SYSTEM (onde o serviço do Windows os lê).
+func propagateConfigToSystemProfile() {
+	appData, err := os.UserConfigDir()
+	if err != nil {
+		return
+	}
+	srcDir := filepath.Join(appData, "RustDesk", "config")
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return
+	}
+	// Ambos os caminhos do perfil SYSTEM (64-bit e 32-bit)
+	dsts := []string{
+		`C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config`,
+		`C:\Windows\SysWOW64\config\systemprofile\AppData\Roaming\RustDesk\config`,
+	}
+	for _, dst := range dsts {
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			os.WriteFile(filepath.Join(dst, e.Name()), data, 0644)
+		}
+	}
+}
+
+func setRustDeskPassword(password string) error {
+	cmd := exec.Command(rustdeskExe, "--password", password)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func installRustDeskService() {
+	// Instala o serviço caso ainda não exista
+	svcInstall := exec.Command(rustdeskExe, "--install-service")
+	svcInstall.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	svcInstall.Run()
+
+	// Garante que o serviço inicia junto com o Windows
+	scConfig := exec.Command("sc", "config", "RustDesk", "start=", "auto")
+	scConfig.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	scConfig.Run()
+
+	// Inicia o serviço (ignora erro caso já esteja rodando)
+	scStart := exec.Command("sc", "start", "RustDesk")
+	scStart.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	scStart.Run()
 }
 
 func installAgent() error {

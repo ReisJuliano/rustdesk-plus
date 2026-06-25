@@ -9,8 +9,19 @@ else
   SUDO="sudo"
 fi
 
-install_docker() {
+DOCKER_COMPOSE=""
+
+detect_compose() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE="docker-compose"
+  fi
+}
+
+install_docker() {
+  detect_compose
+  if [ -n "$DOCKER_COMPOSE" ]; then
     return
   fi
 
@@ -23,6 +34,7 @@ install_docker() {
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2
   $SUDO systemctl enable --now docker
+  detect_compose
 }
 
 random_secret() {
@@ -72,7 +84,7 @@ if [ -n "$public_host" ]; then
   printf "%s" "$public_host" > data/deployment/public_host
 fi
 
-$SUDO docker compose up -d --build
+$SUDO $DOCKER_COMPOSE up -d --build
 
 web_port="$(sed -n 's/^WEB_PORT=//p' .env | tail -n 1)"
 public_url="$(sed -n 's/^PUBLIC_API_URL=//p' .env | tail -n 1)"

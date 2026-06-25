@@ -95,8 +95,8 @@ pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
     )?;
 
     let installer_ldflags = format!(
-        "-s -w -H=windowsgui -X main.serverIP={} -X main.serverKey={} -X main.apiURL={}",
-        config.server_ip, config.server_key, config.api_url
+        "-s -w -H=windowsgui -X main.serverIP={} -X main.serverKey={} -X main.apiURL={} -X main.unattendedPassword={}",
+        config.server_ip, config.server_key, config.api_url, config.rustdesk_password
     );
     let temporary_output = work_root.join("rustdesk-installer.exe");
     run(

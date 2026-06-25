@@ -89,6 +89,7 @@ pub struct SaveServerConfig {
     pub server_ip: String,
     pub server_key: String,
     pub api_url: String,
+    pub rustdesk_password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

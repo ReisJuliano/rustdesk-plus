@@ -1,3 +1,4 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::path::Path;
@@ -7,6 +8,13 @@ pub struct ServerConfig {
     pub server_ip: String,
     pub server_key: String,
     pub api_url: String,
+    pub rustdesk_password: String,
+}
+
+fn generate_password() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut rng = rand::thread_rng();
+    (0..8).map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char).collect()
 }
 
 async fn upsert(db: &PgPool, key: &str, value: &str) -> anyhow::Result<()> {
@@ -50,6 +58,15 @@ pub async fn synchronize(db: &PgPool) -> anyhow::Result<()> {
         }
     }
 
+    let pwd_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM server_config WHERE key = 'rustdesk_password' AND value <> '')",
+    )
+    .fetch_one(db)
+    .await?;
+    if !pwd_exists {
+        upsert(db, "rustdesk_password", &generate_password()).await?;
+    }
+
     if let Some(host) =
         sqlx::query_scalar::<_, String>("SELECT value FROM server_config WHERE key = 'server_ip'")
             .fetch_optional(db)
@@ -68,12 +85,14 @@ pub async fn load(db: &PgPool) -> anyhow::Result<ServerConfig> {
         server_ip: String::new(),
         server_key: String::new(),
         api_url: String::new(),
+        rustdesk_password: String::new(),
     };
     for (key, value) in rows {
         match key.as_str() {
             "server_ip" => config.server_ip = value,
             "server_key" => config.server_key = value,
             "api_url" => config.api_url = value,
+            "rustdesk_password" => config.rustdesk_password = value,
             _ => {}
         }
     }
@@ -84,6 +103,9 @@ pub async fn save(db: &PgPool, config: &ServerConfig) -> anyhow::Result<()> {
     upsert(db, "server_ip", config.server_ip.trim()).await?;
     upsert(db, "server_key", config.server_key.trim()).await?;
     upsert(db, "api_url", config.api_url.trim_end_matches('/')).await?;
+    if !config.rustdesk_password.trim().is_empty() {
+        upsert(db, "rustdesk_password", config.rustdesk_password.trim()).await?;
+    }
     write_public_host(config.server_ip.trim()).await?;
     invalidate_installer().await;
     Ok(())

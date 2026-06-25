@@ -33,11 +33,13 @@ export default function SettingsPage() {
     server_ip: "",
     server_key: "",
     api_url: "",
+    rustdesk_password: "",
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     getServerConfig().then(setConfig).catch(() => {});
@@ -163,6 +165,29 @@ export default function SettingsPage() {
           </div>
         </form>
       </div>
+
+      {config.rustdesk_password && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">
+            Senha Padrão de Acesso Remoto
+          </h2>
+          <p className="text-xs text-slate-400 mb-4">
+            Configurada automaticamente em todos os PCs pelo instalador. Use esta senha ao conectar pelo RustDesk.
+          </p>
+          <div className="flex items-center gap-3">
+            <span className="font-mono text-lg font-bold tracking-widest text-slate-900 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 select-all">
+              {showPassword ? config.rustdesk_password : "••••••••"}
+            </span>
+            <button
+              onClick={() => setShowPassword((v) => !v)}
+              className="text-xs font-semibold text-slate-500 hover:text-slate-700 border border-slate-200 rounded-2xl px-3 py-1.5 hover:bg-slate-50 transition-colors"
+            >
+              {showPassword ? "Ocultar" : "Mostrar"}
+            </button>
+            <CopyButton text={config.rustdesk_password} />
+          </div>
+        </div>
+      )}
 
       {rustdeskToml && (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
