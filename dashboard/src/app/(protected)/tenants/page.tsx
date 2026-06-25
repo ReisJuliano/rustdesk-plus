@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   listTenants, createTenant, deleteTenant, isSuperAdmin,
-  setActiveTenant,
+  setActiveTenant, getServerConfigForTenant,
   type Tenant,
 } from "@/lib/api";
 import { getStoredUser } from "@/lib/auth";
@@ -17,6 +17,9 @@ export default function TenantsPage() {
   const [newName, setNewName] = useState("");
   const [newSlug, setNewSlug] = useState("");
   const [saving, setSaving] = useState(false);
+  const [installCodes, setInstallCodes] = useState<Record<string, string>>({});
+  const [apiUrl, setApiUrl] = useState("");
+  const [showCode, setShowCode] = useState<Record<string, boolean>>({});
 
   const user = getStoredUser();
 
@@ -31,7 +34,20 @@ export default function TenantsPage() {
 
   async function load() {
     try {
-      setTenants(await listTenants());
+      const list = await listTenants();
+      setTenants(list);
+      // Carrega install_code de cada tenant em paralelo
+      const codes: Record<string, string> = {};
+      let url = "";
+      await Promise.all(list.map(async (t) => {
+        try {
+          const cfg = await getServerConfigForTenant(t.id);
+          codes[t.id] = cfg.install_code ?? "";
+          if (!url && cfg.api_url) url = cfg.api_url.replace(/\/$/, "");
+        } catch { /* ignore */ }
+      }));
+      setInstallCodes(codes);
+      setApiUrl(url);
     } catch (err) {
       setError(err instanceof Error ? err.message : "erro ao carregar clientes");
     }
@@ -155,6 +171,31 @@ export default function TenantsPage() {
                 </span>
               </div>
             </div>
+
+            {/* Código de instalação */}
+            {installCodes[t.id] && apiUrl && (
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400 flex-shrink-0">Código:</span>
+                  <code className="font-mono text-xs font-bold text-slate-700 bg-slate-100 rounded px-2 py-0.5 tracking-widest">
+                    {showCode[t.id] ? installCodes[t.id] : "••••••••"}
+                  </code>
+                  <button
+                    onClick={() => setShowCode(v => ({ ...v, [t.id]: !v[t.id] }))}
+                    className="text-xs text-slate-400 hover:text-slate-600"
+                  >
+                    {showCode[t.id] ? "ocultar" : "ver"}
+                  </button>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(`irm "${apiUrl}/i/${installCodes[t.id]}" | iex`)}
+                    className="text-xs text-blue-600 hover:text-blue-700 font-semibold ml-1"
+                    title={`irm "${apiUrl}/i/${installCodes[t.id]}" | iex`}
+                  >
+                    Copiar comando
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex items-center gap-2 flex-shrink-0">

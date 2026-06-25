@@ -348,6 +348,17 @@ export async function getServerConfig() {
   return request<ServerConfig>("/admin/server-config");
 }
 
+/** Busca config de um tenant específico (para super admin sem trocar o activeTenantId global) */
+export async function getServerConfigForTenant(tenantId: string) {
+  const token = getToken();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  headers["X-Tenant-Id"] = tenantId;
+  const res = await fetch(`${API_URL}/admin/server-config`, { headers });
+  if (!res.ok) throw new Error(`request failed: ${res.status}`);
+  return res.json() as Promise<ServerConfig>;
+}
+
 export async function saveServerConfig(data: ServerConfig) {
   return request<{ ok: boolean }>("/admin/server-config", {
     method: "POST",
