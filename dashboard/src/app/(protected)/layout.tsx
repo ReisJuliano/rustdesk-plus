@@ -77,14 +77,20 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   if (!ready) return null;
 
   const superAdmin = user ? isSuperAdmin(user) : false;
-  // Super admin só vê: Dashboard, Terminal, Clientes, Configuração
+  // Super admin sem cliente ativo: só Dashboard, Terminal, Clientes, Configuração.
+  // Super admin com cliente ativo (impersonando): nav completo igual ao cliente + link Clientes.
   const superAdminNavItems = [
     tenantsNavItem,
     navItems.find((n) => n.href === "/dashboard")!,
     navItems.find((n) => n.href === "/terminal")!,
     navItems.find((n) => n.href === "/settings")!,
   ];
-  const allNavItems = superAdmin ? superAdminNavItems : navItems;
+  const superAdminWithTenantNavItems = [tenantsNavItem, ...navItems];
+  const allNavItems = superAdmin
+    ? activeTenantName
+      ? superAdminWithTenantNavItems
+      : superAdminNavItems
+    : navItems;
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
