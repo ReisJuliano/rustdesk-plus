@@ -472,7 +472,30 @@ Não encaminhe somente para a porta 3000: isso abre o dashboard, mas deixa as ro
 
 ### Windows bloqueia o instalador
 
-O comando de instalação executa `Unblock-File` automaticamente antes de abrir o `.exe`. Se uma máquina continuar exibindo bloqueio de Controle de Aplicativo, WDAC ou AppLocker, a política corporativa precisa liberar o binário ou exigir que ele seja assinado com um certificado confiável. `ExecutionPolicy Bypass` não contorna essas políticas.
+O comando de instalação executa `Unblock-File` automaticamente antes de abrir o `.exe`. Em alguns computadores com Windows 11, o **Controle Inteligente de Aplicativos (Smart App Control)** também pode bloquear o instalador ou o `rustdesk-agent.exe`.
+
+Se aparecer a mensagem “uma política de Controle de Aplicativo bloqueou este arquivo”:
+
+1. Abra **Segurança do Windows**
+2. Entre em **Controle de aplicativos e navegador**
+3. Abra **Configurações do Controle Inteligente de Aplicativos**
+4. Selecione **Desativado**
+5. Execute novamente o comando PowerShell do cliente:
+
+```powershell
+irm "https://painel.suaempresa.com/i/CODIGO" | iex
+```
+
+Para confirmar a instalação:
+
+```powershell
+Get-Service RustDesk
+Get-Process rustdesk-agent
+```
+
+Os dois devem estar em execução. Desative somente o **Controle Inteligente de Aplicativos**; não é necessário desligar o Microsoft Defender Antivirus nem o Firewall. Essa alteração reduz a proteção contra aplicativos desconhecidos. Em versões recentes do Windows, a Microsoft permite reativar o recurso pelas mesmas configurações, quando disponível.
+
+Em computadores gerenciados por empresa com WDAC/AppLocker, a alteração pode estar bloqueada e deve ser realizada pelo administrador da política.
 
 ---
 
