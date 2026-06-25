@@ -38,7 +38,7 @@ O RustDesk Plus é uma solução self-hosted multi-tenant que combina:
 | **Multi-tenant** | N clientes num único servidor; dados, usuários e senha completamente isolados |
 | **Super Admin** | Visão global de todos os clientes; acesso ao painel de cada um com um clique |
 | **Servidor RustDesk embutido** | `hbbs` e `hbbr` sobem no mesmo `docker compose up` |
-| **Instalador por cliente** | `.exe` gerado com a senha exclusiva do cliente; cache invalidado automaticamente |
+| **Instalador por cliente** | Comando PowerShell de uma linha ou `.exe`, gerado com senha exclusiva por cliente |
 | **Senha de acesso remoto** | 8 chars A-Z0-9, gerada automaticamente por tenant, visível nas Configurações |
 | **Auto-registro de dispositivos** | PCs aparecem no painel automaticamente ao conectar ao servidor |
 | **Auto-filial por IP** | Dispositivos na mesma rede herdam a filial automaticamente (por tenant) |
@@ -77,7 +77,7 @@ O RustDesk Plus é uma solução self-hosted multi-tenant que combina:
               └─────────────────────────┌──────────────────────────────────────┐
                                         │           dashboard                  │
                                         │       (Next.js 15 / React 19)        │
-                                        │  porta 80 (via nginx gateway)        │
+                                        │  porta 80/443 (via Caddy gateway)   │
                                         └──────────────────────────────────────┘
   PC gerenciado
   ┌───────────────────────────────┐
@@ -86,7 +86,7 @@ O RustDesk Plus é uma solução self-hosted multi-tenant que combina:
   └───────────────────────────────┘
 ```
 
-O gateway Nginx roteia:
+O gateway Caddy roteia:
 - `/admin/*`, `/api/*`, `/ws/*`, `/setup/*`, `/health`, `/super/*` → `plus-api:21114`
 - Todo o resto → `dashboard:3000`
 
@@ -102,7 +102,7 @@ O gateway Nginx roteia:
 | Agente | Go 1.24 · gorilla/websocket |
 | Instalador | Go 1.24 · Win32 API nativa (user32/gdi32/comctl32) |
 | Servidor RustDesk | hbbs + hbbr (imagem oficial `rustdesk/rustdesk-server`) |
-| Infra | Docker Compose · Nginx 1.27 |
+| Infra | Docker Compose · Caddy 2 |
 
 ---
 
@@ -111,7 +111,8 @@ O gateway Nginx roteia:
 ### Pré-requisitos
 
 - Servidor Linux com Docker Engine e Docker Compose v2 (ou `docker-compose` standalone)
-- Portas abertas: `80/tcp` (ou outra via `WEB_PORT`), `21115/tcp`, `21116/tcp+udp`, `21117/tcp`, `21118/tcp`, `21119/tcp`
+- Portas abertas: `80/tcp`, `443/tcp+udp`, `21115/tcp`, `21116/tcp+udp`, `21117/tcp`, `21118/tcp`, `21119/tcp`
+- Se já houver Nginx/Apache no host, use uma porta local como `127.0.0.1:8090` para o gateway
 
 ### Via script (recomendado)
 
@@ -140,7 +141,11 @@ cd rustdesk-plus
 cat > .env <<EOF
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 JWT_SECRET=$(openssl rand -hex 32)
+WEB_BIND=0.0.0.0
 WEB_PORT=80
+HTTPS_BIND=0.0.0.0
+HTTPS_PORT=443
+CADDY_ADDR=:80
 PUBLIC_HOST=IP_OU_DOMINIO_DO_SERVIDOR
 PUBLIC_API_URL=http://IP_OU_DOMINIO_DO_SERVIDOR
 EOF
@@ -201,8 +206,14 @@ O `super_admin` não pertence a nenhum tenant específico. Ao entrar no painel d
 ### Adicionar PCs ao cliente
 
 1. Entre no painel do cliente (passo acima)
-2. Menu **Configuração** → **Baixar instalador (.exe)**
-3. Execute o `.exe` nos PCs do cliente como Administrador
+2. Menu **Clientes** → copie o comando de instalação do cliente
+3. Execute no PowerShell do PC:
+
+```powershell
+irm "https://painel.suaempresa.com/i/CODIGO" | iex
+```
+
+O script solicita elevação de administrador, baixa o instalador, remove a marca de arquivo vindo da internet e o executa. Também é possível baixar o `.exe` manualmente pela tela de **Configuração**.
 
 O instalador faz automaticamente:
 - Baixa e instala o RustDesk oficial (se necessário)
@@ -229,7 +240,11 @@ Cada cliente tem uma senha de 8 caracteres (A-Z0-9), gerada automaticamente.
 | `POSTGRES_PASSWORD` | sim | `plusapi` | Senha do PostgreSQL |
 | `PUBLIC_HOST` | recomendado | — | IP ou domínio público do servidor |
 | `PUBLIC_API_URL` | recomendado | — | URL pública da API (ex: `http://meuservidor.com`) |
-| `WEB_PORT` | não | `80` | Porta HTTP do gateway Nginx |
+| `CADDY_ADDR` | não | `:80` | Endereço servido pelo Caddy; use o domínio para HTTPS automático |
+| `WEB_BIND` | não | `0.0.0.0` | Interface do host onde a porta HTTP será publicada |
+| `WEB_PORT` | não | `80` | Porta HTTP publicada no host |
+| `HTTPS_BIND` | não | `0.0.0.0` | Interface do host onde a porta HTTPS será publicada |
+| `HTTPS_PORT` | não | `443` | Porta HTTPS TCP/UDP publicada no host |
 
 ---
 
@@ -243,7 +258,8 @@ rustdesk-plus/
 ├── install.sh                       # Script de instalação one-liner
 │
 ├── deploy/
-│   ├── nginx.conf                   # Gateway: roteia /admin /api /ws /setup /super → plus-api
+│   ├── Caddyfile                    # Gateway: HTTPS e proxy para API/dashboard
+│   ├── nginx.conf                   # Referência legada de proxy HTTP
 │   └── rustdesk-server/
 │       ├── Dockerfile               # Extrai hbbs/hbbr da imagem oficial + Alpine
 │       └── hbbs-entrypoint.sh       # Aguarda o IP; reinicia hbbs se o IP mudar
@@ -381,6 +397,42 @@ Internet
 
 As portas **21115–21119** do RustDesk são TCP/UDP direto — **não passam pelo Caddy** e não precisam de certificado.
 
+### Usar Nginx ou Apache já instalado no host
+
+Se o host já ocupa as portas 80 e 443, deixe o Caddy acessível apenas localmente:
+
+```env
+CADDY_ADDR=:80
+WEB_BIND=127.0.0.1
+WEB_PORT=8090
+HTTPS_BIND=127.0.0.1
+HTTPS_PORT=8443
+PUBLIC_HOST=painel.suaempresa.com
+PUBLIC_API_URL=https://painel.suaempresa.com
+```
+
+No Nginx do host, encaminhe o domínio para o gateway completo — não diretamente para o dashboard:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name painel.suaempresa.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+Nesse modo, o certificado TLS fica sob responsabilidade do Nginx/Certbot. A porta 8443 é apenas uma reserva local para evitar conflito com a publicação HTTPS do Compose; o Caddy opera em HTTP na porta 8090.
+
 ### Voltar para HTTP
 
 ```env
@@ -402,6 +454,25 @@ docker-compose up -d --build
 ```
 
 O banco de dados é atualizado automaticamente pelas migrations SQLx. Volumes (`plus-data/postgres`, `data/`) são preservados.
+
+---
+
+## Solução de Problemas
+
+### `502 Bad Gateway` com Nginx no host
+
+Confirme que o Nginx aponta para `http://127.0.0.1:8090` e que o gateway está ativo:
+
+```bash
+docker-compose ps gateway
+curl -I http://127.0.0.1:8090
+```
+
+Não encaminhe somente para a porta 3000: isso abre o dashboard, mas deixa as rotas da API e WebSocket inacessíveis.
+
+### Windows bloqueia o instalador
+
+O comando de instalação executa `Unblock-File` automaticamente antes de abrir o `.exe`. Se uma máquina continuar exibindo bloqueio de Controle de Aplicativo, WDAC ou AppLocker, a política corporativa precisa liberar o binário ou exigir que ele seja assinado com um certificado confiável. `ExecutionPolicy Bypass` não contorna essas políticas.
 
 ---
 

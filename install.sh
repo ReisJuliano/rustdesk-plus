@@ -80,7 +80,10 @@ if [ ! -f .env ]; then
   cat > .env <<EOF
 POSTGRES_PASSWORD=$(random_secret)
 JWT_SECRET=$(random_secret)
+WEB_BIND=0.0.0.0
 WEB_PORT=$web_port
+HTTPS_BIND=0.0.0.0
+HTTPS_PORT=443
 PUBLIC_HOST=$public_host
 PUBLIC_API_URL=$api_url
 CADDY_ADDR=$caddy_addr
