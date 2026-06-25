@@ -38,9 +38,16 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (!token) { router.replace("/login"); return; }
 
-    // Super admin sem tenant ativo só pode acessar a página de clientes
+    // Super admin pode acessar /tenants, /dashboard, /terminal e /settings sem tenant ativo.
+    // Qualquer outra rota redireciona para /tenants para escolher um cliente.
     const stored = getStoredUser();
-    if (stored && isSuperAdmin(stored) && !getActiveTenantId() && pathname !== "/tenants") {
+    const superAdminFreePages = ["/tenants", "/dashboard", "/terminal", "/settings"];
+    if (
+      stored &&
+      isSuperAdmin(stored) &&
+      !getActiveTenantId() &&
+      !superAdminFreePages.some((p) => pathname === p || pathname.startsWith(p + "/"))
+    ) {
       router.replace("/tenants");
       return;
     }
@@ -70,7 +77,14 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   if (!ready) return null;
 
   const superAdmin = user ? isSuperAdmin(user) : false;
-  const allNavItems = superAdmin ? [tenantsNavItem, ...navItems] : navItems;
+  // Super admin só vê: Dashboard, Terminal, Clientes, Configuração
+  const superAdminNavItems = [
+    tenantsNavItem,
+    navItems.find((n) => n.href === "/dashboard")!,
+    navItems.find((n) => n.href === "/terminal")!,
+    navItems.find((n) => n.href === "/settings")!,
+  ];
+  const allNavItems = superAdmin ? superAdminNavItems : navItems;
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
