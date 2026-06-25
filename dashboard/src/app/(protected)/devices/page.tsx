@@ -500,7 +500,7 @@ export default function DevicesPage() {
       const tagMap = new Map<string, Tag[]>();
       for (const row of allDT) {
         if (!tagMap.has(row.device_id)) tagMap.set(row.device_id, []);
-        tagMap.get(row.device_id)!.push({ id: row.tag_id, name: row.name, color: row.color, created_at: "" });
+        tagMap.get(row.device_id)!.push({ id: row.tag_id, name: row.name, color: row.color, created_at: "", tenant_id: null });
       }
       setDeviceTagMap(tagMap);
 
