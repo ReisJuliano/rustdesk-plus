@@ -5,7 +5,7 @@ use axum::{
         header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE},
         Response,
     },
-    routing::{delete, get, patch, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use crate::{
     config::ServerConfig,
     error::AppError,
     models::{
-        Branch, CreateBranch, CreateTag, CreateUser, Device, ExecRequest, ExecResult,
+        Branch, CreateBranch, CreateTag, CreateUser, Device, ExecRequest,
         LoginRequest, PatchDevice, SaveServerConfig, SetDeviceBranch,
         Stats, Tag, User,
     },

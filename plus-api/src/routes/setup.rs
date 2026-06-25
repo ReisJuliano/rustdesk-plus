@@ -81,6 +81,7 @@ async fn setup(
             server_ip: body.server_ip.trim().to_string(),
             server_key: current.server_key,
             api_url: body.api_url.trim_end_matches('/').to_string(),
+            rustdesk_password: current.rustdesk_password,
         },
     )
     .await?;
