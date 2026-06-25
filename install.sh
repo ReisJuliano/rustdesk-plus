@@ -55,16 +55,25 @@ install_docker
 
 if [ ! -f .env ]; then
   public_host="${PUBLIC_HOST:-$(detect_public_ip)}"
+  domain="${DOMAIN:-}"
   web_port="${WEB_PORT:-80}"
-  if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ":${web_port} "; then
-    web_port=8080
-  fi
 
-  api_url=""
-  if [ -n "$public_host" ]; then
-    api_url="http://${public_host}"
-    if [ "$web_port" != "80" ]; then
-      api_url="${api_url}:${web_port}"
+  # Determina CADDY_ADDR e URLs a partir do domínio (se fornecido)
+  if [ -n "$domain" ]; then
+    caddy_addr="$domain"
+    api_url="https://${domain}"
+    public_host="${public_host:-$domain}"
+  else
+    if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ":${web_port} "; then
+      web_port=8080
+    fi
+    caddy_addr=":${web_port}"
+    api_url=""
+    if [ -n "$public_host" ]; then
+      api_url="http://${public_host}"
+      if [ "$web_port" != "80" ]; then
+        api_url="${api_url}:${web_port}"
+      fi
     fi
   fi
 
@@ -74,6 +83,7 @@ JWT_SECRET=$(random_secret)
 WEB_PORT=$web_port
 PUBLIC_HOST=$public_host
 PUBLIC_API_URL=$api_url
+CADDY_ADDR=$caddy_addr
 EOF
 fi
 
@@ -86,19 +96,27 @@ fi
 
 $SUDO $DOCKER_COMPOSE up -d --build
 
-web_port="$(sed -n 's/^WEB_PORT=//p' .env | tail -n 1)"
+caddy_addr="$(sed -n 's/^CADDY_ADDR=//p' .env | tail -n 1)"
 public_url="$(sed -n 's/^PUBLIC_API_URL=//p' .env | tail -n 1)"
 if [ -z "$public_url" ]; then
-  public_url="http://IP-DO-SERVIDOR:${web_port:-80}"
+  public_url="http://IP-DO-SERVIDOR"
 fi
 
 echo
 echo "RustDesk Plus está iniciando."
-echo "Abra: $public_url"
+echo "Acesse: $public_url"
 echo "O primeiro acesso conclui a configuração e cria o administrador."
 echo
-echo "Libere no firewall:"
-echo "  ${web_port:-80}/tcp"
+if echo "$caddy_addr" | grep -qv '^:'; then
+  echo "HTTPS habilitado para: $caddy_addr"
+  echo "O certificado Let's Encrypt será obtido automaticamente."
+  echo "Portas necessárias: 80/tcp, 443/tcp"
+else
+  echo "Modo HTTP. Para habilitar HTTPS, defina CADDY_ADDR=seudominio.com no .env"
+  echo "Porta web: ${caddy_addr#:}/tcp"
+fi
+echo
+echo "Libere também no firewall:"
 echo "  21115/tcp"
 echo "  21116/tcp e 21116/udp"
 echo "  21117/tcp"

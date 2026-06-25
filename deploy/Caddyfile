@@ -1,0 +1,42 @@
+# ── RustDesk Plus — Caddyfile ──────────────────────────────────────────────────
+#
+# CADDY_ADDR controla HTTP vs HTTPS:
+#   HTTP  (IP/sem domínio): CADDY_ADDR=:80
+#   HTTPS (domínio público): CADDY_ADDR=painel.suaempresa.com
+#
+# Para HTTPS, o Caddy obtém e renova o certificado Let's Encrypt automaticamente.
+# Exige que as portas 80 e 443 estejam abertas e apontando para este servidor.
+
+{$CADDY_ADDR} {
+    encode gzip
+
+    # Cabeçalhos de segurança para HTTPS
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # Rotas da API e WebSocket → plus-api
+    @api {
+        path /admin/* /api/* /ws/* /setup/* /super/* /health
+    }
+    handle @api {
+        reverse_proxy plus-api:21114 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Tudo o mais → dashboard Next.js
+    handle {
+        reverse_proxy dashboard:3000 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+}

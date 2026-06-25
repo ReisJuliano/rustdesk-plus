@@ -322,6 +322,77 @@ Todas as rotas `/admin/*` já documentadas na v1.0 continuam funcionando, agora 
 
 ---
 
+## HTTPS
+
+O gateway do RustDesk Plus usa **Caddy**, que obtém e renova certificados Let's Encrypt automaticamente. Basta configurar o domínio no `.env`.
+
+### Pré-requisitos
+
+- Um domínio apontando para o IP do servidor (registro A no DNS)
+- Portas **80** e **443** abertas no firewall
+
+### Ativar HTTPS
+
+Edite o `.env` e troque a variável `CADDY_ADDR`:
+
+```env
+# Antes (HTTP)
+CADDY_ADDR=:80
+
+# Depois (HTTPS)
+CADDY_ADDR=painel.suaempresa.com
+```
+
+Atualize também as URLs:
+
+```env
+PUBLIC_API_URL=https://painel.suaempresa.com
+```
+
+Reinicie o stack:
+
+```bash
+docker-compose up -d
+```
+
+O Caddy detecta que `CADDY_ADDR` é um domínio, faz o desafio ACME via porta 80 e começa a servir HTTPS na 443. O certificado é renovado automaticamente antes de expirar.
+
+### Instalação já com HTTPS
+
+Passe o domínio como variável de ambiente antes de rodar o `install.sh`:
+
+```bash
+DOMAIN=painel.suaempresa.com ./install.sh
+```
+
+O script configura `CADDY_ADDR`, `PUBLIC_API_URL` e `PUBLIC_HOST` automaticamente.
+
+### Como funciona internamente
+
+```
+Internet
+    │ 443 (HTTPS)
+    ▼
+ Caddy (container)
+    │ cert gerenciado automaticamente
+    ├── /admin/* /api/* /ws/* /setup/* /super/*  ──► plus-api:21114
+    └── /*                                        ──► dashboard:3000
+```
+
+As portas **21115–21119** do RustDesk são TCP/UDP direto — **não passam pelo Caddy** e não precisam de certificado.
+
+### Voltar para HTTP
+
+```env
+CADDY_ADDR=:80
+```
+
+```bash
+docker-compose up -d
+```
+
+---
+
 ## Atualização do Servidor
 
 ```bash
