@@ -23,7 +23,7 @@ fn copy_file(source: impl AsRef<Path>, target: impl AsRef<Path>) -> anyhow::Resu
 }
 
 // Bump whenever installer/main.go ou agent/main.go mudar — força rebuild do cache.
-const INSTALLER_BUILD: &str = "3";
+const INSTALLER_BUILD: &str = "4";
 
 pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
     if config.server_ip.trim().is_empty()

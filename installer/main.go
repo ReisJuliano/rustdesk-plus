@@ -430,12 +430,6 @@ func runInstall(hwnd uintptr) {
 	if apiURL != "" {
 		fmt.Fprintf(&sb, "api-server = '%s'\n", apiURL)
 	}
-	// permanent-password é gravado direto no TOML — o RustDesk o armazena como
-	// texto puro em [options]. Não usamos rustdesk --password porque esse comando
-	// precisa do serviço rodando (IPC) e falharia em silêncio aqui.
-	if unattendedPassword != "" {
-		fmt.Fprintf(&sb, "permanent-password = '%s'\n", unattendedPassword)
-	}
 	if err := os.WriteFile(filepath.Join(configDir, "RustDesk2.toml"), []byte(sb.String()), 0644); err != nil {
 		fail("Erro ao salvar config: " + err.Error()); return
 	}
@@ -443,20 +437,30 @@ func runInstall(hwnd uintptr) {
 		fail("Erro ao aplicar a configuração no RustDesk: " + err.Error()); return
 	}
 
-	// Copia toda a config do perfil do usuário atual para o perfil SYSTEM,
-	// pois o serviço do Windows roda como SYSTEM e leria o config antigo.
-	status("Propagando configuração para o serviço...", 80)
+	// Propaga RustDesk2.toml para o perfil SYSTEM ANTES de subir o serviço,
+	// para que o serviço já inicie apontando para o servidor correto.
+	status("Propagando configuração para o serviço...", 75)
 	propagateConfigToSystemProfile()
 
-	status("Instalando agente de gerenciamento...", 82)
+	status("Instalando agente de gerenciamento...", 80)
 	if err := installAgent(); err != nil {
 		fail("Erro ao instalar o agente: " + err.Error()); return
 	}
 
-	status("Configurando serviço de inicialização...", 90)
+	// Sobe o serviço ANTES de definir a senha. rustdesk --password usa IPC
+	// para falar com o serviço em execução; sem ele rodando o comando falha.
+	status("Configurando serviço de inicialização...", 85)
 	installRustDeskService()
 
-	status("Iniciando RustDesk...", 95)
+	if unattendedPassword != "" {
+		// Aguarda o serviço criar o socket IPC e aceitar conexões
+		status("Aguardando serviço inicializar...", 90)
+		time.Sleep(4 * time.Second)
+		status("Definindo senha de acesso remoto...", 93)
+		setRustDeskPasswordWithRetry(unattendedPassword)
+	}
+
+	status("Iniciando RustDesk...", 97)
 	exec.Command(rustdeskExe).Start()
 
 	status("Instalação concluída!", 100)
@@ -549,13 +553,18 @@ func propagateConfigToSystemProfile() {
 	}
 }
 
-func setRustDeskPassword(password string) error {
-	cmd := exec.Command(rustdeskExe, "--password", password)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
+// setRustDeskPasswordWithRetry envia a senha ao serviço via IPC.
+// O serviço pode demorar alguns segundos para criar o socket, então retenta.
+func setRustDeskPasswordWithRetry(password string) {
+	for i := 0; i < 6; i++ {
+		cmd := exec.Command(rustdeskExe, "--password", password)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if _, err := cmd.CombinedOutput(); err == nil {
+			return
+		}
+		time.Sleep(2 * time.Second)
 	}
-	return nil
+	// Não fatal: a instalação prossegue, mas sem senha permanente definida.
 }
 
 func installRustDeskService() {
