@@ -22,6 +22,9 @@ fn copy_file(source: impl AsRef<Path>, target: impl AsRef<Path>) -> anyhow::Resu
     Ok(())
 }
 
+// Bump whenever installer/main.go ou agent/main.go mudar — força rebuild do cache.
+const INSTALLER_BUILD: &str = "3";
+
 pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
     if config.server_ip.trim().is_empty()
         || config.server_key.trim().is_empty()
@@ -38,7 +41,11 @@ pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
         .parent()
         .unwrap_or_else(|| Path::new("/app/generated"))
         .join("installer-config.json");
-    let expected_metadata = serde_json::to_vec(config)?;
+    let expected_metadata = {
+        let mut m = serde_json::to_value(config)?;
+        m["_build"] = serde_json::Value::String(INSTALLER_BUILD.to_string());
+        serde_json::to_vec(&m)?
+    };
 
     if output_path.exists()
         && fs::read(&metadata_path)
