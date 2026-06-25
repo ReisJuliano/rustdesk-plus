@@ -62,6 +62,27 @@ pub async fn save_tenant_password(db: &PgPool, tenant_id: Uuid, password: &str) 
     Ok(())
 }
 
+pub async fn load_tenant_install_code(db: &PgPool, tenant_id: Uuid) -> anyhow::Result<String> {
+    let code: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM tenant_config WHERE tenant_id = $1 AND key = 'install_code'",
+    )
+    .bind(tenant_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(code.unwrap_or_default())
+}
+
+/// Garante que o tenant tem um código de instalação; retorna o código.
+pub async fn ensure_tenant_install_code(db: &PgPool, tenant_id: Uuid) -> anyhow::Result<String> {
+    let existing = load_tenant_install_code(db, tenant_id).await?;
+    if !existing.is_empty() {
+        return Ok(existing);
+    }
+    let code = generate_password(); // mesma lógica: 8 chars A-Z0-9
+    upsert_tenant(db, tenant_id, "install_code", &code).await?;
+    Ok(code)
+}
+
 /// Garante que o tenant tem uma senha gerada; retorna a senha (nova ou existente).
 pub async fn ensure_tenant_password(db: &PgPool, tenant_id: Uuid) -> anyhow::Result<String> {
     let existing = load_tenant_password(db, tenant_id).await?;

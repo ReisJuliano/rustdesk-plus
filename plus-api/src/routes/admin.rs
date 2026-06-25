@@ -51,6 +51,9 @@ pub fn router() -> Router<AppState> {
             get(get_server_config).post(save_server_config),
         )
         .route("/admin/installer", get(download_installer))
+        // Endpoints públicos — por código de instalação (sem auth)
+        .route("/i/:code", get(install_script))
+        .route("/install/:code", get(install_binary))
         // Super admin — gestão de tenants
         .route("/super/tenants", get(list_tenants).post(create_tenant))
         .route("/super/tenants/:id", delete(delete_tenant))
@@ -142,8 +145,9 @@ async fn create_tenant(
     .bind(body.slug.trim())
     .fetch_one(&state.db)
     .await?;
-    // Gera senha inicial do tenant
+    // Gera senha e código de instalação do tenant
     config::ensure_tenant_password(&state.db, tenant.id).await?;
+    config::ensure_tenant_install_code(&state.db, tenant.id).await?;
     Ok(Json(json!(tenant)))
 }
 
@@ -821,6 +825,87 @@ async fn get_stats(
 
 // ── Server Config ─────────────────────────────────────────────────────────────
 
+// ── Instalação por código (sem autenticação) ──────────────────────────────────
+
+async fn tenant_by_install_code(db: &sqlx::PgPool, code: &str) -> Option<uuid::Uuid> {
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT tenant_id FROM tenant_config WHERE key = 'install_code' AND value = $1",
+    )
+    .bind(code)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// GET /i/:code — retorna script PowerShell que baixa e executa o instalador
+async fn install_script(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let tenant_id = tenant_by_install_code(&state.db, &code)
+        .await
+        .ok_or(AppError::NotFound)?;
+    let global = config::load(&state.db).await?;
+    let api_url = global.api_url.trim_end_matches('/').to_string();
+
+    let script = format!(
+        r#"# RustDesk Plus — Instalação automática
+# Execute com: irm "{api_url}/i/{code}" | iex
+$ErrorActionPreference = 'Stop'
+If (-Not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{
+    Write-Host "Solicitando permissão de administrador..." -ForegroundColor Yellow
+    $arg = "-NoProfile -ExecutionPolicy Bypass -Command `"irm '{api_url}/i/{code}' | iex`""
+    Start-Process PowerShell -Verb RunAs -ArgumentList $arg
+    exit
+}}
+Write-Host "RustDesk Plus — Baixando instalador..." -ForegroundColor Cyan
+$tmp = "$env:TEMP\rustdesk-installer-{tenant_id}.exe"
+Invoke-WebRequest -Uri "{api_url}/install/{code}" -OutFile $tmp -UseBasicParsing
+Write-Host "Executando instalador..." -ForegroundColor Cyan
+Start-Process $tmp -Wait
+Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+"#,
+        api_url = api_url,
+        code = code,
+        tenant_id = tenant_id,
+    );
+
+    Ok((
+        [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Disposition", "inline"),
+        ],
+        script,
+    ))
+}
+
+/// GET /install/:code — serve o binário .exe do instalador para o tenant
+async fn install_binary(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<Response<Body>, AppError> {
+    let tenant_id = tenant_by_install_code(&state.db, &code)
+        .await
+        .ok_or(AppError::NotFound)?;
+    let _build_guard = state.installer_build.lock().await;
+    let config = config::load(&state.db).await?;
+    let password = config::load_tenant_password(&state.db, tenant_id).await?;
+    let path = tokio::task::spawn_blocking(move || {
+        crate::installer::build(&config, tenant_id, &password)
+    })
+    .await
+    .map_err(anyhow::Error::new)??;
+    let bytes = tokio::fs::read(path).await.map_err(anyhow::Error::new)?;
+
+    Response::builder()
+        .header(CONTENT_TYPE, "application/vnd.microsoft.portable-executable")
+        .header(CONTENT_DISPOSITION, "attachment; filename=\"rustdesk-installer.exe\"")
+        .header(CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|e| anyhow::Error::new(e).into())
+}
+
 async fn get_server_config(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -828,16 +913,19 @@ async fn get_server_config(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let global = config::load(&state.db).await?;
     let tid = tenant_from_headers(&auth, &headers).ok();
-    let password = if let Some(tid) = tid {
-        config::load_tenant_password(&state.db, tid).await.unwrap_or_default()
+    let (password, install_code) = if let Some(tid) = tid {
+        let pwd = config::load_tenant_password(&state.db, tid).await.unwrap_or_default();
+        let code = config::ensure_tenant_install_code(&state.db, tid).await.unwrap_or_default();
+        (pwd, code)
     } else {
-        String::new()
+        (String::new(), String::new())
     };
     Ok(Json(json!({
         "server_ip": global.server_ip,
         "server_key": global.server_key,
         "api_url": global.api_url,
         "rustdesk_password": password,
+        "install_code": install_code,
     })))
 }
 

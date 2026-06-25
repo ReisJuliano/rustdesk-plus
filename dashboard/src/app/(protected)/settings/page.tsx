@@ -36,6 +36,7 @@ export default function SettingsPage() {
     server_key: "",
     api_url: "",
     rustdesk_password: "",
+    install_code: "",
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -208,11 +209,36 @@ export default function SettingsPage() {
         <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 text-sm text-rose-500">{error}</div>
       )}
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3">Instalador</h2>
-        <p className="text-xs text-slate-400 mb-4">
-          Gera um instalador .exe específico para este cliente, com a senha e configurações deste servidor.
-        </p>
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <div>
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">Instalador</h2>
+          <p className="text-xs text-slate-400">
+            Gera um instalador .exe específico para este cliente, com a senha e configurações deste servidor.
+          </p>
+        </div>
+
+        {config.install_code && config.api_url && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Instalar via PowerShell</p>
+            <p className="text-xs text-slate-400">
+              Execute no PC do cliente como Administrador — baixa e instala automaticamente:
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 bg-slate-900 text-green-400 text-xs font-mono rounded-xl px-4 py-2.5 overflow-x-auto whitespace-nowrap">
+                irm &quot;{config.api_url.replace(/\/$/, "")}/i/{config.install_code}&quot; | iex
+              </code>
+              <CopyButton text={`irm "${config.api_url.replace(/\/$/, "")}/i/${config.install_code}" | iex`} />
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <span className="text-xs text-slate-400">Código:</span>
+              <span className="font-mono text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 tracking-widest">
+                {config.install_code}
+              </span>
+              <CopyButton text={config.install_code} />
+            </div>
+          </div>
+        )}
+
         <button
           type="button"
           onClick={onDownload}

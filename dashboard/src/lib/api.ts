@@ -92,6 +92,7 @@ export type ServerConfig = {
   server_key: string;
   api_url: string;
   rustdesk_password: string;
+  install_code: string;
 };
 
 export type SetupStatus = Omit<ServerConfig, "rustdesk_password"> & {

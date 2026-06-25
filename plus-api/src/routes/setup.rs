@@ -109,8 +109,9 @@ async fn setup(
     )
     .await?;
 
-    // 4. Gera senha inicial do primeiro tenant
+    // 4. Gera senha e código de instalação do primeiro tenant
     config::ensure_tenant_password(&state.db, tenant_id).await?;
+    config::ensure_tenant_install_code(&state.db, tenant_id).await?;
 
     let token = issue_token(user.id, &user.role, None)?;
     Ok(Json(json!({ "token": token, "user": user, "tenant_id": tenant_id })))
