@@ -1,0 +1,100 @@
+name: rustdesk-plus
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: plusapi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plusapi}
+      POSTGRES_DB: plusapi
+    volumes:
+      - ./plus-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plusapi -d plusapi"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend]
+
+  hbbr:
+    build:
+      context: .
+      dockerfile: deploy/rustdesk-server/Dockerfile
+    command: ["/usr/local/bin/hbbr"]
+    restart: unless-stopped
+    working_dir: /data
+    volumes:
+      - ./data/rustdesk:/data
+    ports:
+      - "21117:21117"
+      - "21119:21119"
+    networks: [backend]
+
+  hbbs:
+    build:
+      context: .
+      dockerfile: deploy/rustdesk-server/Dockerfile
+    command: ["/usr/local/bin/hbbs-entrypoint"]
+    restart: unless-stopped
+    environment:
+      DEPLOYMENT_HOST_PATH: /deployment/public_host
+    volumes:
+      - ./data/rustdesk:/data
+      - ./data/deployment:/deployment
+    ports:
+      - "21115:21115"
+      - "21116:21116"
+      - "21116:21116/udp"
+      - "21118:21118"
+    depends_on:
+      - hbbr
+    networks: [backend]
+
+  plus-api:
+    build:
+      context: .
+      dockerfile: plus-api/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://plusapi:${POSTGRES_PASSWORD:-plusapi}@postgres:5432/plusapi
+      JWT_SECRET: ${JWT_SECRET:-change-me-before-production}
+      BIND_ADDR: 0.0.0.0:21114
+      RUSTDESK_KEY_PATH: /rustdesk-data/id_ed25519.pub
+      DEPLOYMENT_HOST_PATH: /deployment/public_host
+      INSTALLER_PATH: /generated/rustdesk-installer.exe
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-}
+    volumes:
+      - ./data/rustdesk:/rustdesk-data:ro
+      - ./data/deployment:/deployment
+      - ./data/generated:/generated
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - plus-api
+    networks: [backend]
+
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - dashboard
+      - plus-api
+    networks: [backend]
+
+networks:
+  backend:
+    driver: bridge

@@ -1,0 +1,38 @@
+/target
+**/target
+Cargo.lock.bak
+*.pdb
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Env
+.env
+.env.local
+
+# DB
+*.sqlite3
+*.sqlite3-journal
+data/
+plus-data/
+
+# Generated installers
+*.exe
+!rustdesk-client/**/*.exe
+
+# Documento interno com dados do servidor (IP, key, etc.)
+projeto.md
+PROJETO.md
+
+# Clones de referência (AGPL, não fazem parte do projeto)
+rustdesk-server/
+rustdesk-client/
+
+# Claude Code settings (pessoal)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
