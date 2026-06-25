@@ -862,8 +862,9 @@ If (-Not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Write-Host "RustDesk Plus — Baixando instalador..." -ForegroundColor Cyan
 $tmp = "$env:TEMP\rustdesk-installer-{tenant_id}.exe"
 Invoke-WebRequest -Uri "{api_url}/install/{code}" -OutFile $tmp -UseBasicParsing
+Unblock-File -LiteralPath $tmp
 Write-Host "Executando instalador..." -ForegroundColor Cyan
-Start-Process $tmp -Wait
+Start-Process -FilePath $tmp -Verb RunAs -Wait
 Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 "#,
         api_url = api_url,
