@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   getStats, listDevices, listTenants, setActiveTenant,
-  isSuperAdmin,
+  getActiveTenantId, isSuperAdmin,
   type Stats, type Device, type Tenant,
 } from "@/lib/api";
 import { getStoredUser } from "@/lib/auth";
