@@ -8,7 +8,7 @@ pub type AgentTx = UnboundedSender<String>;
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
-    /// uuid → WebSocket sender (commands going TO the agent)
+    /// "{tenant_id}:{device_uuid}" → WebSocket sender (comandos para o agente)
     pub agents: Arc<Mutex<HashMap<String, AgentTx>>>,
     pub installer_build: Arc<Mutex<()>>,
 }
@@ -21,4 +21,9 @@ impl AppState {
             installer_build: Arc::new(Mutex::new(())),
         }
     }
+}
+
+/// Chave composta usada no mapa de agentes para evitar colisão entre tenants.
+pub fn agent_key(tenant_id: uuid::Uuid, device_uuid: &str) -> String {
+    format!("{tenant_id}:{device_uuid}")
 }

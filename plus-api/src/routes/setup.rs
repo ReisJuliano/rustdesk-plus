@@ -21,15 +21,15 @@ pub fn router() -> Router<AppState> {
 
 async fn status(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
     let configured: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tenants)")
             .fetch_one(&state.db)
             .await?;
-    let config = config::load(&state.db).await?;
+    let cfg = config::load(&state.db).await?;
     Ok(Json(json!({
         "configured": configured,
-        "server_ip": config.server_ip,
-        "server_key": config.server_key,
-        "api_url": config.api_url,
+        "server_ip": cfg.server_ip,
+        "server_key": cfg.server_key,
+        "api_url": cfg.api_url,
     })))
 }
 
@@ -40,6 +40,8 @@ struct SetupRequest {
     name: String,
     server_ip: String,
     api_url: String,
+    /// Nome do primeiro tenant (empresa do dono)
+    tenant_name: String,
 }
 
 async fn setup(
@@ -47,7 +49,7 @@ async fn setup(
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let configured: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tenants)")
             .fetch_one(&state.db)
             .await?;
     if configured {
@@ -57,16 +59,37 @@ async fn setup(
         || body.password.len() < 8
         || body.server_ip.trim().is_empty()
         || body.api_url.trim().is_empty()
+        || body.tenant_name.trim().is_empty()
     {
         return Err(AppError::BadRequest(
-            "preencha os dados; a senha deve ter pelo menos 8 caracteres".to_string(),
+            "preencha todos os campos; a senha deve ter pelo menos 8 caracteres".to_string(),
         ));
     }
 
+    // Slug derivado do nome do tenant
+    let slug = body
+        .tenant_name
+        .trim()
+        .to_lowercase()
+        .replace(' ', "-")
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .collect::<String>();
+
+    // 1. Cria o primeiro tenant
+    let tenant_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(body.tenant_name.trim())
+    .bind(&slug)
+    .fetch_one(&state.db)
+    .await?;
+
+    // 2. Cria o super admin (tenant_id = NULL)
     let password_hash = hash_password(&body.password)?;
     let user = sqlx::query_as::<_, crate::models::User>(
-        "INSERT INTO users (email, password_hash, name, role) \
-         VALUES ($1, $2, $3, 'admin') RETURNING *",
+        "INSERT INTO users (email, password_hash, name, role, tenant_id) \
+         VALUES ($1, $2, $3, 'super_admin', NULL) RETURNING *",
     )
     .bind(body.email.trim())
     .bind(password_hash)
@@ -74,6 +97,7 @@ async fn setup(
     .fetch_one(&state.db)
     .await?;
 
+    // 3. Salva config global do servidor
     let current = config::load(&state.db).await?;
     config::save(
         &state.db,
@@ -81,11 +105,13 @@ async fn setup(
             server_ip: body.server_ip.trim().to_string(),
             server_key: current.server_key,
             api_url: body.api_url.trim_end_matches('/').to_string(),
-            rustdesk_password: current.rustdesk_password,
         },
     )
     .await?;
 
-    let token = issue_token(user.id, &user.role)?;
-    Ok(Json(json!({ "token": token, "user": user })))
+    // 4. Gera senha inicial do primeiro tenant
+    config::ensure_tenant_password(&state.db, tenant_id).await?;
+
+    let token = issue_token(user.id, &user.role, None)?;
+    Ok(Json(json!({ "token": token, "user": user, "tenant_id": tenant_id })))
 }

@@ -1,10 +1,21 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
+export type Tenant = {
+  id: string;
+  name: string;
+  slug: string;
+  created_at: string;
+  device_count?: number;
+  online_count?: number;
+  user_count?: number;
+};
+
 export type User = {
   id: string;
   email: string;
   name: string;
-  role: "admin" | "operator" | "viewer";
+  role: "super_admin" | "admin" | "operator" | "viewer";
+  tenant_id: string | null;
   created_at: string;
 };
 
@@ -12,6 +23,7 @@ export type Branch = {
   id: string;
   name: string;
   parent_id: string | null;
+  tenant_id: string | null;
   created_at: string;
 };
 
@@ -28,6 +40,7 @@ export type Device = {
   online_since: string | null;
   branch_id: string | null;
   owner_user_id: string | null;
+  tenant_id: string | null;
   last_seen_at: string | null;
   online: boolean;
   created_at: string;
@@ -37,6 +50,7 @@ export type Tag = {
   id: string;
   name: string;
   color: string;
+  tenant_id: string | null;
   created_at: string;
 };
 
@@ -80,9 +94,11 @@ export type ServerConfig = {
   rustdesk_password: string;
 };
 
-export type SetupStatus = ServerConfig & {
+export type SetupStatus = Omit<ServerConfig, "rustdesk_password"> & {
   configured: boolean;
 };
+
+// ── Token / tenant context ────────────────────────────────────────────────────
 
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -95,13 +111,41 @@ export function setToken(token: string | null) {
   else localStorage.removeItem("token");
 }
 
+/** Tenant que o super_admin está visualizando no momento. */
+export function getActiveTenantId(): string | null {
+  if (typeof window === "undefined") return null;
+  return sessionStorage.getItem("activeTenantId");
+}
+
+export function setActiveTenantId(id: string | null) {
+  if (typeof window === "undefined") return;
+  if (id) sessionStorage.setItem("activeTenantId", id);
+  else sessionStorage.removeItem("activeTenantId");
+}
+
+export function getActiveTenantName(): string | null {
+  if (typeof window === "undefined") return null;
+  return sessionStorage.getItem("activeTenantName");
+}
+
+export function setActiveTenant(id: string | null, name?: string) {
+  setActiveTenantId(id);
+  if (typeof window === "undefined") return;
+  if (id && name) sessionStorage.setItem("activeTenantName", name);
+  else sessionStorage.removeItem("activeTenantName");
+}
+
+// ── Fetch helper ──────────────────────────────────────────────────────────────
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
+  const activeTid = getActiveTenantId();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (activeTid) headers["X-Tenant-Id"] = activeTid;
 
   const res = await fetch(`${API_URL}${path}`, { ...options, headers });
   if (!res.ok) {
@@ -115,12 +159,20 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
 export async function login(email: string, password: string) {
   return request<{ token: string; user: User }>("/admin/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
 }
+
+export function isSuperAdmin(user: User) {
+  return user.role === "super_admin";
+}
+
+// ── Setup ─────────────────────────────────────────────────────────────────────
 
 export async function getSetupStatus() {
   return request<SetupStatus>("/setup/status");
@@ -132,12 +184,32 @@ export async function completeSetup(data: {
   name: string;
   server_ip: string;
   api_url: string;
+  tenant_name: string;
 }) {
-  return request<{ token: string; user: User }>("/setup", {
+  return request<{ token: string; user: User; tenant_id: string }>("/setup", {
     method: "POST",
     body: JSON.stringify(data),
   });
 }
+
+// ── Tenants (super admin) ─────────────────────────────────────────────────────
+
+export async function listTenants() {
+  return request<Tenant[]>("/super/tenants");
+}
+
+export async function createTenant(name: string, slug: string) {
+  return request<Tenant>("/super/tenants", {
+    method: "POST",
+    body: JSON.stringify({ name, slug }),
+  });
+}
+
+export async function deleteTenant(id: string) {
+  return request<{ ok: boolean }>(`/super/tenants/${id}`, { method: "DELETE" });
+}
+
+// ── Branches ──────────────────────────────────────────────────────────────────
 
 export async function listBranches() {
   return request<Branch[]>("/admin/branches");
@@ -154,6 +226,8 @@ export async function deleteBranch(id: string) {
   return request<{ ok: boolean }>(`/admin/branches/${id}`, { method: "DELETE" });
 }
 
+// ── Users ─────────────────────────────────────────────────────────────────────
+
 export async function listUsers() {
   return request<User[]>("/admin/users");
 }
@@ -168,6 +242,8 @@ export async function createUser(email: string, password: string, name: string, 
 export async function deleteUser(id: string) {
   return request<{ ok: boolean }>(`/admin/users/${id}`, { method: "DELETE" });
 }
+
+// ── Devices ───────────────────────────────────────────────────────────────────
 
 export async function listDevices(filter: {
   branch_id?: string;
@@ -214,6 +290,8 @@ export async function getStats() {
   return request<Stats>("/admin/stats");
 }
 
+// ── Tags ──────────────────────────────────────────────────────────────────────
+
 export async function listTags() {
   return request<Tag[]>("/admin/tags");
 }
@@ -245,6 +323,8 @@ export async function getAllDeviceTags() {
   return request<DeviceTagRow[]>("/admin/device-tags");
 }
 
+// ── Exec ──────────────────────────────────────────────────────────────────────
+
 export async function execCommand(body: {
   cmd: string;
   powershell?: boolean;
@@ -261,6 +341,8 @@ export async function getExecResults(jobId: string) {
   return request<ExecJobResult>(`/admin/exec/${jobId}`);
 }
 
+// ── Server Config ─────────────────────────────────────────────────────────────
+
 export async function getServerConfig() {
   return request<ServerConfig>("/admin/server-config");
 }
@@ -274,9 +356,12 @@ export async function saveServerConfig(data: ServerConfig) {
 
 export async function downloadInstaller() {
   const token = getToken();
-  const res = await fetch(`${API_URL}/admin/installer`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  const activeTid = getActiveTenantId();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (activeTid) headers["X-Tenant-Id"] = activeTid;
+
+  const res = await fetch(`${API_URL}/admin/installer`, { headers });
   if (!res.ok) {
     if (res.status === 401 && typeof window !== "undefined") {
       setToken(null);

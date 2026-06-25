@@ -3,6 +3,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Tenant {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
     pub email: String,
@@ -10,6 +18,7 @@ pub struct User {
     pub password_hash: String,
     pub name: String,
     pub role: String,
+    pub tenant_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -18,6 +27,7 @@ pub struct Branch {
     pub id: Uuid,
     pub name: String,
     pub parent_id: Option<Uuid>,
+    pub tenant_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -33,6 +43,7 @@ pub struct Device {
     pub favorite: bool,
     pub branch_id: Option<Uuid>,
     pub owner_user_id: Option<Uuid>,
+    pub tenant_id: Option<Uuid>,
     #[serde(skip_serializing)]
     pub unattended_password_hash: Option<String>,
     pub ip_address: Option<String>,
@@ -56,6 +67,35 @@ pub struct ServerConfigRow {
     pub key: String,
     pub value: String,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Tag {
+    pub id: Uuid,
+    pub name: String,
+    pub color: String,
+    pub tenant_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ExecResult {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub device_id: Uuid,
+    pub output: String,
+    pub exit_code: Option<i32>,
+    pub done: bool,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTenant {
+    pub name: String,
+    pub slug: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +129,7 @@ pub struct SaveServerConfig {
     pub server_ip: String,
     pub server_key: String,
     pub api_url: String,
+    /// Senha de acesso remoto — escrita em tenant_config, não em server_config global
     pub rustdesk_password: Option<String>,
 }
 
@@ -97,38 +138,16 @@ pub struct SetDeviceBranch {
     pub branch_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
-pub struct Tag {
-    pub id: Uuid,
-    pub name: String,
-    pub color: String,
-    pub created_at: DateTime<Utc>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct CreateTag {
     pub name: String,
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
-pub struct ExecResult {
-    pub id: Uuid,
-    pub job_id: Uuid,
-    pub device_id: Uuid,
-    pub output: String,
-    pub exit_code: Option<i32>,
-    pub done: bool,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct ExecRequest {
     pub cmd: String,
     pub powershell: Option<bool>,
-    /// Send to specific devices (by UUID)
     pub targets: Option<Vec<String>>,
-    /// Send to all devices with this tag
     pub tag_id: Option<Uuid>,
 }

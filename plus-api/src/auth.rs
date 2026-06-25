@@ -36,14 +36,17 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 pub struct Claims {
     pub sub: Uuid,
     pub role: String,
+    /// None para super_admin (sem tenant fixo)
+    pub tid: Option<Uuid>,
     pub exp: usize,
 }
 
-pub fn issue_token(user_id: Uuid, role: &str) -> anyhow::Result<String> {
+pub fn issue_token(user_id: Uuid, role: &str, tenant_id: Option<Uuid>) -> anyhow::Result<String> {
     let exp = (chrono::Utc::now() + chrono::Duration::days(7)).timestamp() as usize;
     let claims = Claims {
         sub: user_id,
         role: role.to_string(),
+        tid: tenant_id,
         exp,
     };
     let token = encode(
@@ -57,14 +60,31 @@ pub fn issue_token(user_id: Uuid, role: &str) -> anyhow::Result<String> {
 pub struct AuthUser {
     pub id: Uuid,
     pub role: String,
+    pub tenant_id: Option<Uuid>,
 }
 
 impl AuthUser {
+    pub fn is_super_admin(&self) -> bool {
+        self.role == "super_admin"
+    }
+
     pub fn require_admin(&self) -> Result<(), AppError> {
-        if self.role == "admin" {
+        if self.role == "admin" || self.role == "super_admin" {
             Ok(())
         } else {
             Err(AppError::Forbidden)
+        }
+    }
+
+    /// Retorna o tenant efetivo: usa override (header X-Tenant-Id) se super_admin,
+    /// senão usa o tenant do próprio token.
+    pub fn effective_tenant(&self, override_tid: Option<Uuid>) -> Result<Uuid, AppError> {
+        if self.is_super_admin() {
+            override_tid.ok_or_else(|| {
+                AppError::BadRequest("super admin precisa do header X-Tenant-Id".to_string())
+            })
+        } else {
+            self.tenant_id.ok_or(AppError::Forbidden)
         }
     }
 }
@@ -92,6 +112,7 @@ where
         Ok(AuthUser {
             id: data.claims.sub,
             role: data.claims.role,
+            tenant_id: data.claims.tid,
         })
     }
 }

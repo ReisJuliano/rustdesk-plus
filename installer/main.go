@@ -29,6 +29,7 @@ var (
 	serverKey          = ""
 	apiURL             = ""
 	unattendedPassword = ""
+	tenantID           = ""
 )
 
 const rustdeskDownload = "https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-x86_64.exe"
@@ -189,7 +190,7 @@ const headerH = 80
 
 // ── Entry Point ───────────────────────────────────────────────────────────────
 func main() {
-	if serverIP == "" {
+	if serverIP == "" || tenantID == "" {
 		msgBox(0, "Este instalador não foi compilado com as configurações do servidor.\n\nCompile com os ldflags corretos.", "Erro", MB_ICONERROR|MB_OK)
 		return
 	}
@@ -427,8 +428,14 @@ func runInstall(hwnd uintptr) {
 	fmt.Fprintf(&sb, "key = '%s'\n", serverKey)
 	fmt.Fprintf(&sb, "custom-rendezvous-server = '%s'\n", serverIP)
 	fmt.Fprintf(&sb, "relay-server = '%s'\n", serverIP)
-	if apiURL != "" {
-		fmt.Fprintf(&sb, "api-server = '%s'\n", apiURL)
+	// O tenant_id é embutido como query param do api-server.
+	// O plus-api extrai esse param nos endpoints /api/heartbeat e /api/sysinfo.
+	effectiveAPIURL := apiURL
+	if apiURL != "" && tenantID != "" {
+		effectiveAPIURL = apiURL + "?tid=" + tenantID
+	}
+	if effectiveAPIURL != "" {
+		fmt.Fprintf(&sb, "api-server = '%s'\n", effectiveAPIURL)
 	}
 	if err := os.WriteFile(filepath.Join(configDir, "RustDesk2.toml"), []byte(sb.String()), 0644); err != nil {
 		fail("Erro ao salvar config: " + err.Error()); return

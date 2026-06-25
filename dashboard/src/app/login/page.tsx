@@ -17,6 +17,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("Administrador");
+  const [tenantName, setTenantName] = useState("");
   const [serverIp, setServerIp] = useState("");
   const [apiUrl, setApiUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +48,7 @@ export default function LoginPage() {
             name,
             server_ip: serverIp,
             api_url: apiUrl,
+            tenant_name: tenantName || name,
           });
       setToken(response.token);
       setStoredUser(response.user);
@@ -83,14 +85,18 @@ export default function LoginPage() {
               {firstRun && (
                 <>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <Field label="Nome">
+                    <Field label="Seu nome">
                       <input required value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
                     </Field>
-                    <Field label="IP ou domínio público">
-                      <input required value={serverIp} onChange={(e) => setServerIp(e.target.value)} className={inputClass} />
+                    <Field label="Nome da empresa (primeiro cliente)">
+                      <input required value={tenantName} onChange={(e) => setTenantName(e.target.value)}
+                        placeholder="Minha Empresa" className={inputClass} />
                     </Field>
                   </div>
-                  <Field label="URL pública do painel/API">
+                  <Field label="IP ou domínio público">
+                    <input required value={serverIp} onChange={(e) => setServerIp(e.target.value)} className={inputClass} />
+                  </Field>
+                  <Field label="URL pública da API">
                     <input required value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} className={inputClass} />
                   </Field>
                   <div className="rounded-xl bg-blue-50 border border-blue-100 px-3.5 py-3 text-xs text-blue-700">

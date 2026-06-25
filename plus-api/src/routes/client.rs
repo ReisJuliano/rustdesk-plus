@@ -1,5 +1,5 @@
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Query, State},
     http::HeaderMap,
     response::IntoResponse,
     routing::{get, post},
@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
+use uuid::Uuid;
 
 use crate::{error::AppError, state::AppState};
 
@@ -62,53 +63,62 @@ async fn current_user() -> impl IntoResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct TidQuery {
+    tid: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
 struct HeartbeatBody {
     id: String,
     uuid: String,
+    /// Embutido diretamente pelo agente; para o cliente RustDesk nativo vem via ?tid= na URL
+    tenant_id: Option<Uuid>,
 }
 
 async fn heartbeat(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(q): Query<TidQuery>,
     Json(body): Json<HeartbeatBody>,
 ) -> Result<Json<Value>, AppError> {
+    let Some(tenant_id) = body.tenant_id.or(q.tid) else {
+        tracing::warn!("heartbeat sem tenant_id descartado: rustdesk_id={}", body.id);
+        return Ok(Json(json!({})));
+    };
     let ip = extract_ip(addr, &headers);
 
-    // Remove placeholder criado pelo agente (uuid = 'host-*') com o mesmo rustdesk_id
-    // mas UUID diferente — isso evita conflito de unique key quando o cliente real chega.
+    // Remove placeholder criado pelo agente com o mesmo rustdesk_id mas UUID diferente
     sqlx::query(
-        "DELETE FROM devices WHERE rustdesk_id = $1 AND uuid != $2 AND uuid LIKE 'host-%'",
+        "DELETE FROM devices WHERE rustdesk_id = $1 AND uuid != $2 AND uuid LIKE 'host-%' AND tenant_id = $3",
     )
     .bind(&body.id)
     .bind(&body.uuid)
+    .bind(tenant_id)
     .execute(&state.db)
     .await
     .ok();
 
-    // Upsert device — registra IP e atualiza online_since só se estava offline
     sqlx::query(
         r#"
-        INSERT INTO devices (rustdesk_id, uuid, ip_address, last_seen_at, online, online_since)
-        VALUES ($1, $2, $3, now(), true, now())
-        ON CONFLICT (uuid) DO UPDATE SET
+        INSERT INTO devices (rustdesk_id, uuid, ip_address, last_seen_at, online, online_since, tenant_id)
+        VALUES ($1, $2, $3, now(), true, now(), $4)
+        ON CONFLICT (tenant_id, uuid) DO UPDATE SET
             rustdesk_id  = EXCLUDED.rustdesk_id,
             ip_address   = EXCLUDED.ip_address,
             last_seen_at = now(),
             online       = true,
-            online_since = CASE
-                WHEN devices.online = false THEN now()
-                ELSE devices.online_since
-            END
+            online_since = CASE WHEN devices.online = false THEN now() ELSE devices.online_since END
         "#,
     )
     .bind(&body.id)
     .bind(&body.uuid)
     .bind(&ip)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
-    // Auto-filial: se este device não tem filial mas outro com o mesmo IP tem, herda
+    // Auto-filial por IP dentro do mesmo tenant
     sqlx::query(
         r#"
         UPDATE devices AS d
@@ -117,21 +127,24 @@ async fn heartbeat(
             WHERE other.ip_address = $2
               AND other.branch_id IS NOT NULL
               AND other.uuid != $1
+              AND other.tenant_id = $3
             ORDER BY other.last_seen_at DESC
             LIMIT 1
         )
-        WHERE d.uuid = $1
+        WHERE d.uuid = $1 AND d.tenant_id = $3
           AND d.branch_id IS NULL
           AND EXISTS (
               SELECT 1 FROM devices other
               WHERE other.ip_address = $2
                 AND other.branch_id IS NOT NULL
                 AND other.uuid != $1
+                AND other.tenant_id = $3
           )
         "#,
     )
     .bind(&body.uuid)
     .bind(&ip)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -144,41 +157,44 @@ struct SysinfoBody {
     uuid: String,
     hostname: Option<String>,
     os: Option<String>,
+    tenant_id: Option<Uuid>,
 }
 
 async fn sysinfo(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(q): Query<TidQuery>,
     Json(body): Json<SysinfoBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    let Some(tenant_id) = body.tenant_id.or(q.tid) else {
+        tracing::warn!("sysinfo sem tenant_id descartado: rustdesk_id={}", body.id);
+        return Ok("SYSINFO_IGNORED");
+    };
     let ip = extract_ip(addr, &headers);
 
-    // Mesma limpeza: remove placeholder do agente se o cliente real chegou
     sqlx::query(
-        "DELETE FROM devices WHERE rustdesk_id = $1 AND uuid != $2 AND uuid LIKE 'host-%'",
+        "DELETE FROM devices WHERE rustdesk_id = $1 AND uuid != $2 AND uuid LIKE 'host-%' AND tenant_id = $3",
     )
     .bind(&body.id)
     .bind(&body.uuid)
+    .bind(tenant_id)
     .execute(&state.db)
     .await
     .ok();
 
     sqlx::query(
         r#"
-        INSERT INTO devices (rustdesk_id, uuid, hostname, os, ip_address, last_seen_at, online, online_since)
-        VALUES ($1, $2, $3, $4, $5, now(), true, now())
-        ON CONFLICT (uuid) DO UPDATE SET
+        INSERT INTO devices (rustdesk_id, uuid, hostname, os, ip_address, last_seen_at, online, online_since, tenant_id)
+        VALUES ($1, $2, $3, $4, $5, now(), true, now(), $6)
+        ON CONFLICT (tenant_id, uuid) DO UPDATE SET
             rustdesk_id  = EXCLUDED.rustdesk_id,
             hostname     = EXCLUDED.hostname,
             os           = EXCLUDED.os,
             ip_address   = EXCLUDED.ip_address,
             last_seen_at = now(),
             online       = true,
-            online_since = CASE
-                WHEN devices.online = false THEN now()
-                ELSE devices.online_since
-            END
+            online_since = CASE WHEN devices.online = false THEN now() ELSE devices.online_since END
         "#,
     )
     .bind(&body.id)
@@ -186,6 +202,7 @@ async fn sysinfo(
     .bind(&body.hostname)
     .bind(&body.os)
     .bind(&ip)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 

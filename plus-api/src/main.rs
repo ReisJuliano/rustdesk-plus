@@ -15,32 +15,6 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn bootstrap_admin(db: &sqlx::PgPool) -> anyhow::Result<()> {
-    let (email, password) = match (std::env::var("ADMIN_EMAIL"), std::env::var("ADMIN_PASSWORD")) {
-        (Ok(e), Ok(p)) => (e, p),
-        _ => return Ok(()),
-    };
-
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
-        .fetch_one(db)
-        .await?;
-    if count > 0 {
-        return Ok(());
-    }
-
-    let password_hash = auth::hash_password(&password)?;
-    sqlx::query(
-        "INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, 'admin')",
-    )
-    .bind(&email)
-    .bind(&password_hash)
-    .bind("Admin")
-    .execute(db)
-    .await?;
-    tracing::info!("bootstrapped initial admin user {email}");
-    Ok(())
-}
-
 async fn offline_sweeper(db: sqlx::PgPool) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
     loop {
@@ -62,7 +36,6 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let db = db::connect().await.expect("failed to connect to database");
-    bootstrap_admin(&db).await.expect("failed to bootstrap admin user");
     config::synchronize(&db)
         .await
         .expect("failed to synchronize server configuration");

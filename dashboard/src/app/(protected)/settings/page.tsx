@@ -5,8 +5,10 @@ import {
   downloadInstaller,
   getServerConfig,
   saveServerConfig,
+  isSuperAdmin,
   type ServerConfig,
 } from "@/lib/api";
+import { getStoredUser } from "@/lib/auth";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -40,6 +42,9 @@ export default function SettingsPage() {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+
+  const user = getStoredUser();
+  const superAdmin = user ? isSuperAdmin(user) : false;
 
   useEffect(() => {
     getServerConfig().then(setConfig).catch(() => {});
@@ -106,66 +111,7 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-4">
-          Dados do Servidor
-        </h2>
-        <form onSubmit={onSubmit} className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
-                IP / Host
-              </label>
-              <input
-                required
-                value={config.server_ip}
-                onChange={(e) => setConfig((current) => ({ ...current, server_ip: e.target.value }))}
-                placeholder="168.138.151.131"
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
-                URL da API
-              </label>
-              <input
-                value={config.api_url}
-                onChange={(e) => setConfig((current) => ({ ...current, api_url: e.target.value }))}
-                placeholder="http://168.138.151.131:21114"
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
-              Chave pública
-            </label>
-            <input
-              value={config.server_key}
-              readOnly
-              placeholder="Aguardando o servidor gerar a chave..."
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-600 placeholder-slate-400 font-mono"
-            />
-            <p className="text-xs text-slate-400">Gerada e atualizada automaticamente pelo servidor.</p>
-          </div>
-          {error && (
-            <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 text-sm text-rose-500">
-              {error}
-            </div>
-          )}
-          <div className="flex items-center gap-3">
-            <button
-              type="submit"
-              disabled={saving}
-              className="rounded-2xl px-4 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 transition-colors"
-            >
-              {saving ? "Salvando..." : "Salvar configuração"}
-            </button>
-            {saved && <span className="text-sm text-emerald-600 font-semibold">✓ Salvo</span>}
-          </div>
-        </form>
-      </div>
-
+      {/* Senha de acesso remoto — visível para todos */}
       {config.rustdesk_password && (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
           <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">
@@ -174,7 +120,7 @@ export default function SettingsPage() {
           <p className="text-xs text-slate-400 mb-4">
             Configurada automaticamente em todos os PCs pelo instalador. Use esta senha ao conectar pelo RustDesk.
           </p>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span className="font-mono text-lg font-bold tracking-widest text-slate-900 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 select-all">
               {showPassword ? config.rustdesk_password : "••••••••"}
             </span>
@@ -189,7 +135,62 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {rustdeskToml && (
+      {/* Config do servidor — só super admin edita os campos de IP/URL */}
+      {superAdmin && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-4">
+            Dados do Servidor (global)
+          </h2>
+          <form onSubmit={onSubmit} className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">IP / Host</label>
+                <input
+                  required
+                  value={config.server_ip}
+                  onChange={(e) => setConfig((c) => ({ ...c, server_ip: e.target.value }))}
+                  placeholder="168.138.151.131"
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">URL da API</label>
+                <input
+                  value={config.api_url}
+                  onChange={(e) => setConfig((c) => ({ ...c, api_url: e.target.value }))}
+                  placeholder="http://168.138.151.131:21114"
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Chave pública</label>
+              <input
+                value={config.server_key}
+                readOnly
+                placeholder="Aguardando o servidor gerar a chave..."
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-600 placeholder-slate-400 font-mono"
+              />
+              <p className="text-xs text-slate-400">Gerada e atualizada automaticamente pelo servidor.</p>
+            </div>
+            {error && (
+              <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 text-sm text-rose-500">{error}</div>
+            )}
+            <div className="flex items-center gap-3">
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-2xl px-4 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                {saving ? "Salvando..." : "Salvar configuração"}
+              </button>
+              {saved && <span className="text-sm text-emerald-600 font-semibold">✓ Salvo</span>}
+            </div>
+          </form>
+        </div>
+      )}
+
+      {rustdeskToml && superAdmin && (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest">
@@ -203,14 +204,22 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {error && !superAdmin && (
+        <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 text-sm text-rose-500">{error}</div>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3">Instalador</h2>
+        <p className="text-xs text-slate-400 mb-4">
+          Gera um instalador .exe específico para este cliente, com a senha e configurações deste servidor.
+        </p>
         <button
           type="button"
           onClick={onDownload}
           disabled={downloading}
           className="w-full rounded-2xl px-5 py-3 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 transition-colors"
         >
-          {downloading ? "Baixando..." : "Baixar instalador (.exe)"}
+          {downloading ? "Gerando instalador..." : "Baixar instalador (.exe)"}
         </button>
       </div>
     </div>

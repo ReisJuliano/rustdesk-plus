@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{
         header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE},
-        Response,
+        HeaderMap, Response,
     },
     routing::{delete, get, post},
     Json, Router,
@@ -14,14 +14,13 @@ use uuid::Uuid;
 
 use crate::{
     auth::{hash_password, issue_token, verify_password, AuthUser},
-    config::ServerConfig,
+    config::{self, ServerConfig},
     error::AppError,
     models::{
-        Branch, CreateBranch, CreateTag, CreateUser, Device, ExecRequest,
-        LoginRequest, PatchDevice, SaveServerConfig, SetDeviceBranch,
-        Stats, Tag, User,
+        Branch, CreateBranch, CreateTag, CreateTenant, CreateUser, Device, ExecRequest,
+        LoginRequest, PatchDevice, SaveServerConfig, SetDeviceBranch, Stats, Tag, Tenant, User,
     },
-    state::AppState,
+    state::{agent_key, AppState},
 };
 
 pub fn router() -> Router<AppState> {
@@ -34,8 +33,9 @@ pub fn router() -> Router<AppState> {
         .route("/admin/devices", get(list_devices))
         .route(
             "/admin/devices/:id",
-            get(get_device).delete(delete_device).patch(patch_device),
+            get(get_device).delete(delete_device).post(patch_device),
         )
+        .route("/admin/devices/:id", axum::routing::patch(patch_device_patch))
         .route("/admin/devices/:id/branch", post(set_device_branch))
         .route("/admin/devices/:id/favorite", post(toggle_favorite))
         .route("/admin/devices/:id/tags", get(list_device_tags).post(add_device_tag))
@@ -51,78 +51,184 @@ pub fn router() -> Router<AppState> {
             get(get_server_config).post(save_server_config),
         )
         .route("/admin/installer", get(download_installer))
+        // Super admin — gestão de tenants
+        .route("/super/tenants", get(list_tenants).post(create_tenant))
+        .route("/super/tenants/:id", delete(delete_tenant))
 }
 
-async fn download_installer(
-    State(state): State<AppState>,
-    _auth: AuthUser,
-) -> Result<Response<Body>, AppError> {
-    let _build_guard = state.installer_build.lock().await;
-    let config = crate::config::load(&state.db).await?;
-    let path = tokio::task::spawn_blocking(move || crate::installer::build(&config))
-        .await
-        .map_err(anyhow::Error::new)??;
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(anyhow::Error::new)?;
+// ── Helper: extrai tenant_id efetivo (JWT ou X-Tenant-Id para super_admin) ───
 
-    Response::builder()
-        .header(CONTENT_TYPE, "application/vnd.microsoft.portable-executable")
-        .header(
-            CONTENT_DISPOSITION,
-            "attachment; filename=\"rustdesk-installer.exe\"",
-        )
-        .header(CONTENT_LENGTH, bytes.len().to_string())
-        .body(Body::from(bytes))
-        .map_err(|error| anyhow::Error::new(error).into())
+fn tenant_from_headers(auth: &AuthUser, headers: &HeaderMap) -> Result<Uuid, AppError> {
+    let override_tid = headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok());
+    auth.effective_tenant(override_tid)
 }
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
 async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
-        .bind(&body.email)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
+    // Super admin: tenant_id IS NULL
+    // Outros usuários: UNIQUE(tenant_id, email) — localiza pelo email diretamente
+    let user = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE email = $1 ORDER BY (tenant_id IS NULL) DESC LIMIT 1",
+    )
+    .bind(&body.email)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
 
     if !verify_password(&body.password, &user.password_hash) {
         return Err(AppError::Unauthorized);
     }
 
-    let token = issue_token(user.id, &user.role)?;
+    let token = issue_token(user.id, &user.role, user.tenant_id)?;
     Ok(Json(json!({ "token": token, "user": user })))
 }
+
+// ── Tenants (super admin) ─────────────────────────────────────────────────────
+
+async fn list_tenants(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !auth.is_super_admin() {
+        return Err(AppError::Forbidden);
+    }
+    #[derive(sqlx::FromRow, serde::Serialize)]
+    struct TenantStats {
+        id: Uuid,
+        name: String,
+        slug: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        device_count: i64,
+        online_count: i64,
+        user_count: i64,
+    }
+    let tenants = sqlx::query_as::<_, TenantStats>(
+        r#"
+        SELECT t.id, t.name, t.slug, t.created_at,
+               (SELECT COUNT(*) FROM devices d WHERE d.tenant_id = t.id)              AS device_count,
+               (SELECT COUNT(*) FROM devices d WHERE d.tenant_id = t.id AND d.online) AS online_count,
+               (SELECT COUNT(*) FROM users   u WHERE u.tenant_id = t.id)              AS user_count
+        FROM tenants t
+        ORDER BY t.created_at
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!(tenants)))
+}
+
+async fn create_tenant(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<CreateTenant>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !auth.is_super_admin() {
+        return Err(AppError::Forbidden);
+    }
+    if body.name.trim().is_empty() || body.slug.trim().is_empty() {
+        return Err(AppError::BadRequest("nome e slug são obrigatórios".to_string()));
+    }
+    let tenant = sqlx::query_as::<_, Tenant>(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+    )
+    .bind(body.name.trim())
+    .bind(body.slug.trim())
+    .fetch_one(&state.db)
+    .await?;
+    // Gera senha inicial do tenant
+    config::ensure_tenant_password(&state.db, tenant.id).await?;
+    Ok(Json(json!(tenant)))
+}
+
+async fn delete_tenant(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !auth.is_super_admin() {
+        return Err(AppError::Forbidden);
+    }
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    config::invalidate_tenant_installer(id).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ── Instalador ────────────────────────────────────────────────────────────────
+
+async fn download_installer(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+) -> Result<Response<Body>, AppError> {
+    let tenant_id = tenant_from_headers(&auth, &headers)?;
+    let _build_guard = state.installer_build.lock().await;
+    let config = config::load(&state.db).await?;
+    let password = config::load_tenant_password(&state.db, tenant_id).await?;
+    let path = tokio::task::spawn_blocking(move || {
+        crate::installer::build(&config, tenant_id, &password)
+    })
+    .await
+    .map_err(anyhow::Error::new)??;
+    let bytes = tokio::fs::read(path).await.map_err(anyhow::Error::new)?;
+
+    Response::builder()
+        .header(CONTENT_TYPE, "application/vnd.microsoft.portable-executable")
+        .header(CONTENT_DISPOSITION, "attachment; filename=\"rustdesk-installer.exe\"")
+        .header(CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|e| anyhow::Error::new(e).into())
+}
+
+// ── Users ─────────────────────────────────────────────────────────────────────
 
 async fn list_users(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<User>>, AppError> {
     auth.require_admin()?;
-    let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at")
-        .fetch_all(&state.db)
-        .await?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    let users = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at",
+    )
+    .bind(tid)
+    .fetch_all(&state.db)
+    .await?;
     Ok(Json(users))
 }
 
 async fn create_user(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Json(body): Json<CreateUser>,
 ) -> Result<Json<User>, AppError> {
     auth.require_admin()?;
-    if !["admin", "operator", "viewer"].contains(&body.role.as_str()) {
-        return Err(AppError::BadRequest("invalid role".to_string()));
+    let tid = tenant_from_headers(&auth, &headers)?;
+    let valid_roles = ["admin", "operator", "viewer"];
+    if !valid_roles.contains(&body.role.as_str()) {
+        return Err(AppError::BadRequest("role inválido".to_string()));
     }
     let password_hash = hash_password(&body.password)?;
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, $4) RETURNING *",
+        "INSERT INTO users (email, password_hash, name, role, tenant_id) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING *",
     )
     .bind(&body.email)
     .bind(&password_hash)
     .bind(&body.name)
     .bind(&body.role)
+    .bind(tid)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(user))
@@ -131,37 +237,50 @@ async fn create_user(
 async fn delete_user(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
-    sqlx::query("DELETE FROM users WHERE id = $1")
+    let tid = tenant_from_headers(&auth, &headers)?;
+    sqlx::query("DELETE FROM users WHERE id = $1 AND tenant_id = $2")
         .bind(id)
+        .bind(tid)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
+// ── Branches ──────────────────────────────────────────────────────────────────
+
 async fn list_branches(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<Branch>>, AppError> {
-    let branches = sqlx::query_as::<_, Branch>("SELECT * FROM branches ORDER BY name")
-        .fetch_all(&state.db)
-        .await?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    let branches = sqlx::query_as::<_, Branch>(
+        "SELECT * FROM branches WHERE tenant_id = $1 ORDER BY name",
+    )
+    .bind(tid)
+    .fetch_all(&state.db)
+    .await?;
     Ok(Json(branches))
 }
 
 async fn create_branch(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Json(body): Json<CreateBranch>,
 ) -> Result<Json<Branch>, AppError> {
     auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
     let branch = sqlx::query_as::<_, Branch>(
-        "INSERT INTO branches (name, parent_id) VALUES ($1, $2) RETURNING *",
+        "INSERT INTO branches (name, parent_id, tenant_id) VALUES ($1, $2, $3) RETURNING *",
     )
     .bind(&body.name)
     .bind(body.parent_id)
+    .bind(tid)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(branch))
@@ -170,15 +289,20 @@ async fn create_branch(
 async fn delete_branch(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
-    sqlx::query("DELETE FROM branches WHERE id = $1")
+    let tid = tenant_from_headers(&auth, &headers)?;
+    sqlx::query("DELETE FROM branches WHERE id = $1 AND tenant_id = $2")
         .bind(id)
+        .bind(tid)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
 }
+
+// ── Devices ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceFilter {
@@ -190,21 +314,25 @@ pub struct DeviceFilter {
 
 async fn list_devices(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
     Query(filter): Query<DeviceFilter>,
 ) -> Result<Json<Vec<Device>>, AppError> {
+    let tid = tenant_from_headers(&auth, &headers)?;
     let devices = sqlx::query_as::<_, Device>(
         r#"
         SELECT * FROM devices
-        WHERE ($1::uuid IS NULL OR branch_id = $1)
-          AND ($2::text IS NULL OR hostname ILIKE '%' || $2 || '%'
-                                OR rustdesk_id ILIKE '%' || $2 || '%'
-                                OR alias ILIKE '%' || $2 || '%')
-          AND ($3::boolean IS NULL OR online = $3)
-          AND ($4::boolean IS NULL OR favorite = $4)
+        WHERE tenant_id = $1
+          AND ($2::uuid IS NULL OR branch_id = $2)
+          AND ($3::text IS NULL OR hostname ILIKE '%' || $3 || '%'
+                                OR rustdesk_id ILIKE '%' || $3 || '%'
+                                OR alias ILIKE '%' || $3 || '%')
+          AND ($4::boolean IS NULL OR online = $4)
+          AND ($5::boolean IS NULL OR favorite = $5)
         ORDER BY favorite DESC, online DESC, last_seen_at DESC NULLS LAST
         "#,
     )
+    .bind(tid)
     .bind(filter.branch_id)
     .bind(filter.search)
     .bind(filter.online)
@@ -216,48 +344,79 @@ async fn list_devices(
 
 async fn get_device(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Device>, AppError> {
-    let device = sqlx::query_as::<_, Device>("SELECT * FROM devices WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    let device = sqlx::query_as::<_, Device>(
+        "SELECT * FROM devices WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tid)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound)?;
     Ok(Json(device))
 }
 
 async fn delete_device(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
-    sqlx::query("DELETE FROM devices WHERE id = $1")
+    let tid = tenant_from_headers(&auth, &headers)?;
+    sqlx::query("DELETE FROM devices WHERE id = $1 AND tenant_id = $2")
         .bind(id)
+        .bind(tid)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
+// POST /admin/devices/:id é ambíguo com PATCH — mantemos PATCH como principal
 async fn patch_device(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<PatchDevice>,
 ) -> Result<Json<Device>, AppError> {
+    patch_device_inner(&state, auth, headers, id, body).await
+}
+
+async fn patch_device_patch(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchDevice>,
+) -> Result<Json<Device>, AppError> {
+    patch_device_inner(&state, auth, headers, id, body).await
+}
+
+async fn patch_device_inner(
+    state: &AppState,
+    auth: AuthUser,
+    headers: HeaderMap,
+    id: Uuid,
+    body: PatchDevice,
+) -> Result<Json<Device>, AppError> {
     auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
     let device = sqlx::query_as::<_, Device>(
         r#"
         UPDATE devices
-        SET
-          alias       = CASE WHEN $2::text IS NOT NULL THEN $2 ELSE alias END,
-          description = CASE WHEN $3::text IS NOT NULL THEN $3 ELSE description END
-        WHERE id = $1
+        SET alias       = CASE WHEN $3::text IS NOT NULL THEN $3 ELSE alias END,
+            description = CASE WHEN $4::text IS NOT NULL THEN $4 ELSE description END
+        WHERE id = $1 AND tenant_id = $2
         RETURNING *
         "#,
     )
     .bind(id)
+    .bind(tid)
     .bind(body.alias)
     .bind(body.description)
     .fetch_optional(&state.db)
@@ -269,15 +428,18 @@ async fn patch_device(
 async fn set_device_branch(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<SetDeviceBranch>,
 ) -> Result<Json<Device>, AppError> {
     auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
     let device = sqlx::query_as::<_, Device>(
-        "UPDATE devices SET branch_id = $1 WHERE id = $2 RETURNING *",
+        "UPDATE devices SET branch_id = $1 WHERE id = $2 AND tenant_id = $3 RETURNING *",
     )
     .bind(body.branch_id)
     .bind(id)
+    .bind(tid)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
@@ -287,13 +449,16 @@ async fn set_device_branch(
 async fn toggle_favorite(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Device>, AppError> {
     auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
     let device = sqlx::query_as::<_, Device>(
-        "UPDATE devices SET favorite = NOT favorite WHERE id = $1 RETURNING *",
+        "UPDATE devices SET favorite = NOT favorite WHERE id = $1 AND tenant_id = $2 RETURNING *",
     )
     .bind(id)
+    .bind(tid)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
@@ -304,26 +469,34 @@ async fn toggle_favorite(
 
 async fn list_tags(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<Tag>>, AppError> {
-    let tags = sqlx::query_as::<_, Tag>("SELECT * FROM tags ORDER BY name")
-        .fetch_all(&state.db)
-        .await?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    let tags = sqlx::query_as::<_, Tag>(
+        "SELECT * FROM tags WHERE tenant_id = $1 ORDER BY name",
+    )
+    .bind(tid)
+    .fetch_all(&state.db)
+    .await?;
     Ok(Json(tags))
 }
 
 async fn create_tag(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Json(body): Json<CreateTag>,
 ) -> Result<Json<Tag>, AppError> {
     auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
     let color = body.color.unwrap_or_else(|| "#3b82f6".to_string());
     let tag = sqlx::query_as::<_, Tag>(
-        "INSERT INTO tags (name, color) VALUES ($1, $2) RETURNING *",
+        "INSERT INTO tags (name, color, tenant_id) VALUES ($1, $2, $3) RETURNING *",
     )
     .bind(&body.name)
     .bind(&color)
+    .bind(tid)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(tag))
@@ -332,11 +505,14 @@ async fn create_tag(
 async fn delete_tag(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
-    sqlx::query("DELETE FROM tags WHERE id = $1")
+    let tid = tenant_from_headers(&auth, &headers)?;
+    sqlx::query("DELETE FROM tags WHERE id = $1 AND tenant_id = $2")
         .bind(id)
+        .bind(tid)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
@@ -344,13 +520,22 @@ async fn delete_tag(
 
 async fn list_device_tags(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Tag>>, AppError> {
+    let tid = tenant_from_headers(&auth, &headers)?;
     let tags = sqlx::query_as::<_, Tag>(
-        "SELECT t.* FROM tags t JOIN device_tags dt ON dt.tag_id = t.id WHERE dt.device_id = $1 ORDER BY t.name",
+        r#"
+        SELECT t.* FROM tags t
+        JOIN device_tags dt ON dt.tag_id = t.id
+        JOIN devices d ON d.id = dt.device_id
+        WHERE dt.device_id = $1 AND d.tenant_id = $2
+        ORDER BY t.name
+        "#,
     )
     .bind(id)
+    .bind(tid)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(tags))
@@ -364,10 +549,30 @@ struct AddTagBody {
 async fn add_device_tag(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<AddTagBody>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    // Garante que device e tag pertencem ao mesmo tenant
+    let device_ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM devices WHERE id = $1 AND tenant_id = $2)",
+    )
+    .bind(id)
+    .bind(tid)
+    .fetch_one(&state.db)
+    .await?;
+    let tag_ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tags WHERE id = $1 AND tenant_id = $2)",
+    )
+    .bind(body.tag_id)
+    .bind(tid)
+    .fetch_one(&state.db)
+    .await?;
+    if !device_ok || !tag_ok {
+        return Err(AppError::NotFound);
+    }
     sqlx::query(
         "INSERT INTO device_tags (device_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
@@ -381,22 +586,32 @@ async fn add_device_tag(
 async fn remove_device_tag(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path((id, tag_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
-    sqlx::query("DELETE FROM device_tags WHERE device_id = $1 AND tag_id = $2")
-        .bind(id)
-        .bind(tag_id)
-        .execute(&state.db)
-        .await?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    sqlx::query(
+        r#"
+        DELETE FROM device_tags
+        WHERE device_id = $1 AND tag_id = $2
+          AND EXISTS (SELECT 1 FROM devices WHERE id = $1 AND tenant_id = $3)
+        "#,
+    )
+    .bind(id)
+    .bind(tag_id)
+    .bind(tid)
+    .execute(&state.db)
+    .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Returns all (device_id, tag) pairs — used by frontend to show tags on cards efficiently
 async fn all_device_tags(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let tid = tenant_from_headers(&auth, &headers)?;
     #[derive(sqlx::FromRow, serde::Serialize)]
     struct Row {
         device_id: Uuid,
@@ -405,8 +620,16 @@ async fn all_device_tags(
         color: String,
     }
     let rows = sqlx::query_as::<_, Row>(
-        "SELECT dt.device_id, t.id AS tag_id, t.name, t.color FROM device_tags dt JOIN tags t ON t.id = dt.tag_id ORDER BY t.name",
+        r#"
+        SELECT dt.device_id, t.id AS tag_id, t.name, t.color
+        FROM device_tags dt
+        JOIN tags t ON t.id = dt.tag_id
+        JOIN devices d ON d.id = dt.device_id
+        WHERE d.tenant_id = $1
+        ORDER BY t.name
+        "#,
     )
+    .bind(tid)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!(rows)))
@@ -417,41 +640,50 @@ async fn all_device_tags(
 async fn exec_command(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Json(body): Json<ExecRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
 
-    // Determine target device UUIDs
     let targets: Vec<String> = if let Some(t) = body.targets {
         t
     } else if let Some(tag_id) = body.tag_id {
         sqlx::query_scalar::<_, String>(
-            "SELECT d.uuid FROM devices d JOIN device_tags dt ON dt.device_id = d.id WHERE dt.tag_id = $1 AND d.online = true",
+            r#"
+            SELECT d.uuid FROM devices d
+            JOIN device_tags dt ON dt.device_id = d.id
+            WHERE dt.tag_id = $1 AND d.online = true AND d.tenant_id = $2
+            "#,
         )
         .bind(tag_id)
+        .bind(tid)
         .fetch_all(&state.db)
         .await?
     } else {
-        sqlx::query_scalar::<_, String>("SELECT uuid FROM devices WHERE online = true")
-            .fetch_all(&state.db)
-            .await?
+        sqlx::query_scalar::<_, String>(
+            "SELECT uuid FROM devices WHERE online = true AND tenant_id = $1",
+        )
+        .bind(tid)
+        .fetch_all(&state.db)
+        .await?
     };
 
-    // Create job in DB
     let job_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO exec_jobs (cmd, powershell, created_by) VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO exec_jobs (cmd, powershell, created_by, tenant_id) VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(&body.cmd)
     .bind(body.powershell.unwrap_or(false))
     .bind(auth.id)
+    .bind(tid)
     .fetch_one(&state.db)
     .await?;
 
-    // Get device IDs and create result rows (one per target device)
     let device_rows: Vec<(Uuid, String)> = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, uuid FROM devices WHERE uuid = ANY($1)",
+        "SELECT id, uuid FROM devices WHERE uuid = ANY($1) AND tenant_id = $2",
     )
     .bind(&targets)
+    .bind(tid)
     .fetch_all(&state.db)
     .await?;
 
@@ -465,7 +697,6 @@ async fn exec_command(
         .await?;
     }
 
-    // Send command to connected agents
     let cmd_msg = serde_json::to_string(&json!({
         "job_id": job_id,
         "cmd": &body.cmd,
@@ -477,7 +708,8 @@ async fn exec_command(
     let mut sent = 0usize;
     let mut unsent_device_ids = Vec::new();
     for (device_id, device_uuid) in &device_rows {
-        if let Some(tx) = agents.get(device_uuid) {
+        let key = agent_key(tid, device_uuid);
+        if let Some(tx) = agents.get(&key) {
             if tx.send(cmd_msg.clone()).is_ok() {
                 sent += 1;
                 continue;
@@ -513,9 +745,11 @@ async fn exec_command(
 
 async fn get_exec_results(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let tid = tenant_from_headers(&auth, &headers)?;
     #[derive(sqlx::FromRow, serde::Serialize)]
     struct Row {
         device_id: Uuid,
@@ -535,18 +769,21 @@ async fn get_exec_results(
                er.output, er.exit_code, er.done, er.started_at, er.finished_at
         FROM exec_results er
         JOIN devices d ON d.id = er.device_id
-        WHERE er.job_id = $1
+        JOIN exec_jobs j ON j.id = er.job_id
+        WHERE er.job_id = $1 AND j.tenant_id = $2
         ORDER BY d.hostname NULLS LAST
         "#,
     )
     .bind(job_id)
+    .bind(tid)
     .fetch_all(&state.db)
     .await?;
 
     let job = sqlx::query_as::<_, (String, bool)>(
-        "SELECT cmd, powershell FROM exec_jobs WHERE id = $1",
+        "SELECT cmd, powershell FROM exec_jobs WHERE id = $1 AND tenant_id = $2",
     )
     .bind(job_id)
+    .bind(tid)
     .fetch_optional(&state.db)
     .await?;
 
@@ -558,50 +795,78 @@ async fn get_exec_results(
     })))
 }
 
+// ── Stats ─────────────────────────────────────────────────────────────────────
+
 async fn get_stats(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
 ) -> Result<Json<Stats>, AppError> {
+    let tid = tenant_from_headers(&auth, &headers)?;
     let stats = sqlx::query_as::<_, Stats>(
         r#"
         SELECT
-          (SELECT COUNT(*)::bigint FROM devices)                          AS total_devices,
-          (SELECT COUNT(*)::bigint FROM devices WHERE online = true)      AS online_devices,
-          (SELECT COUNT(*)::bigint FROM devices WHERE online = false)     AS offline_devices,
-          (SELECT COUNT(*)::bigint FROM branches)                         AS total_branches,
-          (SELECT COUNT(*)::bigint FROM users)                            AS total_users
+          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1)                      AS total_devices,
+          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1 AND online = true)    AS online_devices,
+          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1 AND online = false)   AS offline_devices,
+          (SELECT COUNT(*)::bigint FROM branches WHERE tenant_id = $1)                      AS total_branches,
+          (SELECT COUNT(*)::bigint FROM users    WHERE tenant_id = $1)                      AS total_users
         "#,
     )
+    .bind(tid)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(stats))
 }
 
+// ── Server Config ─────────────────────────────────────────────────────────────
+
 async fn get_server_config(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    Ok(Json(json!(crate::config::load(&state.db).await?)))
+    let global = config::load(&state.db).await?;
+    let tid = tenant_from_headers(&auth, &headers).ok();
+    let password = if let Some(tid) = tid {
+        config::load_tenant_password(&state.db, tid).await.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok(Json(json!({
+        "server_ip": global.server_ip,
+        "server_key": global.server_key,
+        "api_url": global.api_url,
+        "rustdesk_password": password,
+    })))
 }
 
 async fn save_server_config(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Json(body): Json<SaveServerConfig>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
 
-    let existing = crate::config::load(&state.db).await?;
-    crate::config::save(
-        &state.db,
-        &ServerConfig {
-            server_ip: body.server_ip,
-            server_key: body.server_key,
-            api_url: body.api_url,
-            rustdesk_password: body.rustdesk_password.unwrap_or(existing.rustdesk_password),
-        },
-    )
-    .await?;
+    // Apenas super_admin altera a config global
+    if auth.is_super_admin() {
+        config::save(
+            &state.db,
+            &ServerConfig {
+                server_ip: body.server_ip,
+                server_key: body.server_key,
+                api_url: body.api_url,
+            },
+        )
+        .await?;
+    }
+
+    // Qualquer admin pode atualizar a senha do seu tenant
+    if let Some(pwd) = body.rustdesk_password.filter(|p| !p.trim().is_empty()) {
+        let tid = tenant_from_headers(&auth, &headers)?;
+        config::save_tenant_password(&state.db, tid, pwd.trim()).await?;
+    }
 
     Ok(Json(json!({ "ok": true })))
 }

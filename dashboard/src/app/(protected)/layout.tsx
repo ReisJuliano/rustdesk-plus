@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { setToken } from "@/lib/api";
+import { setToken, setActiveTenant, getActiveTenantId, getActiveTenantName, isSuperAdmin } from "@/lib/api";
 import { getStoredUser, setStoredUser } from "@/lib/auth";
 
 const navItems = [
@@ -21,25 +21,48 @@ const navItems = [
     icon: <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1-1.187.447l-1.598-.54a6.993 6.993 0 0 1-1.929 1.115l-.33 1.652a1 1 0 0 1-.98.804H8.82a1 1 0 0 1-.98-.804l-.331-1.652a6.993 6.993 0 0 1-1.929-1.115l-1.598.54a1 1 0 0 1-1.186-.447l-1.18-2.044a1 1 0 0 1 .205-1.251l1.267-1.114a7.05 7.05 0 0 1 0-2.227L1.821 7.773a1 1 0 0 1-.206-1.25l1.18-2.045a1 1 0 0 1 1.187-.447l1.598.54A6.992 6.992 0 0 1 7.51 3.456l.33-1.652ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clipRule="evenodd" /></svg> },
 ];
 
+const tenantsNavItem = {
+  href: "/tenants",
+  label: "Clientes",
+  icon: <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M1 2.75A.75.75 0 0 1 1.75 2h10.5a.75.75 0 0 1 0 1.5H12v13.75a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1-.75-.75v-3.5a.75.75 0 0 0-.75-.75h-2.5a.75.75 0 0 0-.75.75v3.5a.75.75 0 0 1-.75.75H3a.75.75 0 0 1-.75-.75V2.75A.75.75 0 0 1 1 2.75Zm16.5 10.5a.75.75 0 0 1 .75.75v3.25a.75.75 0 0 1-.75.75h-3.5a.75.75 0 0 1-.75-.75V14a2 2 0 0 1 4 0v-.75a.75.75 0 0 1 .25 0ZM13 9.25a2.25 2.25 0 1 1 4.5 0 2.25 2.25 0 0 1-4.5 0Z" clipRule="evenodd" /></svg>,
+};
+
 export default function ProtectedLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
+  const [activeTenantName, setActiveTenantName] = useState<string | null>(null);
   const user = getStoredUser();
 
   useEffect(() => {
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (!token) { router.replace("/login"); return; }
     setReady(true);
+    setActiveTenantName(getActiveTenantName());
   }, [router]);
+
+  // Atualiza o banner ao voltar de navegações
+  useEffect(() => {
+    setActiveTenantName(getActiveTenantName());
+  }, [pathname]);
 
   function logout() {
     setToken(null);
     setStoredUser(null);
+    setActiveTenant(null);
     router.replace("/login");
   }
 
+  function exitTenant() {
+    setActiveTenant(null);
+    setActiveTenantName(null);
+    router.push("/tenants");
+  }
+
   if (!ready) return null;
+
+  const superAdmin = user ? isSuperAdmin(user) : false;
+  const allNavItems = superAdmin ? [tenantsNavItem, ...navItems] : navItems;
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
@@ -56,7 +79,7 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
 
         {/* Nav */}
         <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {navItems.map(({ href, label, icon }) => {
+          {allNavItems.map(({ href, label, icon }) => {
             const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
             return (
               <Link key={href} href={href}
@@ -80,7 +103,7 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-slate-700 truncate leading-tight">{user?.name}</p>
-              <p className="text-xs text-slate-400 capitalize">{user?.role}</p>
+              <p className="text-xs text-slate-400 capitalize">{user?.role === "super_admin" ? "Super Admin" : user?.role}</p>
             </div>
             <button onClick={logout} title="Sair"
               className="text-slate-400 hover:text-red-500 p-1 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0">
@@ -94,6 +117,24 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
       </aside>
 
       <div className="flex-1 min-w-0 overflow-hidden flex flex-col">
+        {/* Banner de impersonation */}
+        {superAdmin && activeTenantName && (
+          <div className="flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200 text-sm">
+            <div className="flex items-center gap-2">
+              <svg className="h-4 w-4 text-amber-500 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-7-4a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM9 9a.75.75 0 0 0 0 1.5h.253a.25.25 0 0 1 .244.304l-.459 2.066A1.75 1.75 0 0 0 10.747 15H11a.75.75 0 0 0 0-1.5h-.253a.25.25 0 0 1-.244-.304l.459-2.066A1.75 1.75 0 0 0 9.253 9H9Z" clipRule="evenodd" />
+              </svg>
+              <span className="text-amber-700 font-medium">Visualizando como:</span>
+              <span className="text-amber-900 font-bold">{activeTenantName}</span>
+            </div>
+            <button
+              onClick={exitTenant}
+              className="text-xs font-semibold text-amber-700 hover:text-amber-900 border border-amber-300 rounded-lg px-2.5 py-1 hover:bg-amber-100 transition-colors"
+            >
+              Sair do cliente
+            </button>
+          </div>
+        )}
         <main className="flex-1 overflow-y-auto">{children}</main>
       </div>
     </div>

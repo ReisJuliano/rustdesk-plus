@@ -28,7 +28,8 @@ import (
 // Injetados em build time
 var (
 	apiURL     = "http://localhost:21114"
-	deviceUUID = "" // se vazio, lido do RustDesk2.toml
+	deviceUUID = "" // se vazio, derivado do hostname
+	tenantID   = "" // UUID do tenant — obrigatório
 )
 
 // ── Config do dispositivo ────────────────────────────────────────────────────
@@ -137,6 +138,9 @@ func connect(uuid string) {
 	query.Set("hostname", host)
 	query.Set("rustdesk_id", getRustDeskID())
 	query.Set("os", "Windows")
+	if tenantID != "" {
+		query.Set("tenant_id", tenantID)
+	}
 	wsURL += "/ws/agent?" + query.Encode()
 
 	dialer := websocket.DefaultDialer

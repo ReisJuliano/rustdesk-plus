@@ -9,8 +9,9 @@ use axum::{
 };
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
-use crate::state::AppState;
+use crate::state::{agent_key, AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/ws/agent", get(agent_ws))
@@ -19,6 +20,7 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct AgentParams {
     uuid: String,
+    tenant_id: Option<Uuid>,
     hostname: Option<String>,
     rustdesk_id: Option<String>,
     os: Option<String>,
@@ -39,30 +41,34 @@ async fn handle_agent(
     params: AgentParams,
     state: AppState,
 ) {
+    let Some(tenant_id) = params.tenant_id else {
+        tracing::warn!("agente sem tenant_id rejeitado: uuid={uuid}");
+        return;
+    };
+
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let registered_uuid = match ensure_agent_device(&state, &params).await {
+    let registered_uuid = match ensure_agent_device(&state, tenant_id, &params).await {
         Some(device_uuid) => device_uuid,
-        None => resolve_device_uuid(&state, &uuid)
+        None => resolve_device_uuid(&state, tenant_id, &uuid)
             .await
             .unwrap_or_else(|| uuid.clone()),
     };
+    let key = agent_key(tenant_id, &registered_uuid);
     let mut presence_interval = tokio::time::interval(std::time::Duration::from_secs(20));
 
-    // Register agent
     {
         let mut agents = state.agents.lock().await;
-        agents.insert(registered_uuid.clone(), tx);
+        agents.insert(key.clone(), tx);
     }
-    update_agent_presence(&state, &registered_uuid, true).await;
+    update_agent_presence(&state, tenant_id, &registered_uuid, true).await;
 
-    tracing::info!("agent connected: {uuid} -> {registered_uuid}");
+    tracing::info!("agent connected: {uuid} -> {registered_uuid} (tenant={tenant_id})");
 
     loop {
         tokio::select! {
             _ = presence_interval.tick() => {
-                update_agent_presence(&state, &registered_uuid, true).await;
+                update_agent_presence(&state, tenant_id, &registered_uuid, true).await;
             }
-            // Forward commands from admin to agent
             cmd = rx.recv() => {
                 match cmd {
                     Some(msg) => {
@@ -73,12 +79,11 @@ async fn handle_agent(
                     None => break,
                 }
             }
-            // Receive output from agent and persist to DB
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(result) = serde_json::from_str::<AgentResult>(&text) {
-                            let _ = persist_result(&state, result).await;
+                            let _ = persist_result(&state, tenant_id, result).await;
                         }
                     }
                     Some(Ok(Message::Ping(p))) => {
@@ -90,15 +95,14 @@ async fn handle_agent(
         }
     }
 
-    // Unregister
     let mut agents = state.agents.lock().await;
-    agents.remove(&registered_uuid);
+    agents.remove(&key);
     drop(agents);
-    update_agent_presence(&state, &registered_uuid, false).await;
-    tracing::info!("agent disconnected: {uuid} -> {registered_uuid}");
+    update_agent_presence(&state, tenant_id, &registered_uuid, false).await;
+    tracing::info!("agent disconnected: {uuid} -> {registered_uuid} (tenant={tenant_id})");
 }
 
-async fn ensure_agent_device(state: &AppState, params: &AgentParams) -> Option<String> {
+async fn ensure_agent_device(state: &AppState, tenant_id: Uuid, params: &AgentParams) -> Option<String> {
     let hostname = params
         .hostname
         .clone()
@@ -109,8 +113,6 @@ async fn ensure_agent_device(state: &AppState, params: &AgentParams) -> Option<S
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    // RustDesk and the agent use different UUIDs. Prefer the device row already
-    // registered by RustDesk, matching it through the stable numeric RustDesk ID.
     if let Some(rustdesk_id) = real_rustdesk_id.as_deref() {
         let existing = sqlx::query_scalar::<_, String>(
             r#"
@@ -120,13 +122,14 @@ async fn ensure_agent_device(state: &AppState, params: &AgentParams) -> Option<S
                 last_seen_at = now(),
                 online = true,
                 online_since = CASE WHEN online = false THEN now() ELSE online_since END
-            WHERE rustdesk_id = $1
+            WHERE rustdesk_id = $1 AND tenant_id = $4
             RETURNING uuid
             "#,
         )
         .bind(rustdesk_id)
         .bind(&hostname)
         .bind(&params.os)
+        .bind(tenant_id)
         .fetch_optional(&state.db)
         .await;
 
@@ -145,9 +148,9 @@ async fn ensure_agent_device(state: &AppState, params: &AgentParams) -> Option<S
     let result = sqlx::query_scalar::<_, String>(
         r#"
         INSERT INTO devices
-            (rustdesk_id, uuid, hostname, os, last_seen_at, online, online_since)
-        VALUES ($1, $2, $3, $4, now(), true, now())
-        ON CONFLICT (uuid) DO UPDATE SET
+            (rustdesk_id, uuid, hostname, os, last_seen_at, online, online_since, tenant_id)
+        VALUES ($1, $2, $3, $4, now(), true, now(), $5)
+        ON CONFLICT (tenant_id, uuid) DO UPDATE SET
             rustdesk_id = EXCLUDED.rustdesk_id,
             hostname = COALESCE(EXCLUDED.hostname, devices.hostname),
             os = COALESCE(EXCLUDED.os, devices.os),
@@ -161,6 +164,7 @@ async fn ensure_agent_device(state: &AppState, params: &AgentParams) -> Option<S
     .bind(&params.uuid)
     .bind(hostname)
     .bind(&params.os)
+    .bind(tenant_id)
     .fetch_one(&state.db)
     .await;
 
@@ -173,7 +177,7 @@ async fn ensure_agent_device(state: &AppState, params: &AgentParams) -> Option<S
     }
 }
 
-async fn update_agent_presence(state: &AppState, uuid: &str, online: bool) {
+async fn update_agent_presence(state: &AppState, tenant_id: Uuid, uuid: &str, online: bool) {
     let result = if online {
         sqlx::query(
             r#"
@@ -181,15 +185,17 @@ async fn update_agent_presence(state: &AppState, uuid: &str, online: bool) {
             SET online = true,
                 last_seen_at = now(),
                 online_since = CASE WHEN online = false THEN now() ELSE online_since END
-            WHERE uuid = $1
+            WHERE uuid = $1 AND tenant_id = $2
             "#,
         )
         .bind(uuid)
+        .bind(tenant_id)
         .execute(&state.db)
         .await
     } else {
-        sqlx::query("UPDATE devices SET online = false WHERE uuid = $1")
+        sqlx::query("UPDATE devices SET online = false WHERE uuid = $1 AND tenant_id = $2")
             .bind(uuid)
+            .bind(tenant_id)
             .execute(&state.db)
             .await
     };
@@ -199,24 +205,28 @@ async fn update_agent_presence(state: &AppState, uuid: &str, online: bool) {
     }
 }
 
-async fn resolve_device_uuid(state: &AppState, agent_id: &str) -> Option<String> {
+async fn resolve_device_uuid(state: &AppState, tenant_id: Uuid, agent_id: &str) -> Option<String> {
     if let Some(hostname) = agent_id.strip_prefix("host-") {
         return sqlx::query_scalar::<_, String>(
-            "SELECT uuid FROM devices WHERE lower(hostname) = lower($1) ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
+            "SELECT uuid FROM devices WHERE lower(hostname) = lower($1) AND tenant_id = $2 ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
         )
         .bind(hostname)
+        .bind(tenant_id)
         .fetch_optional(&state.db)
         .await
         .ok()
         .flatten();
     }
 
-    sqlx::query_scalar::<_, String>("SELECT uuid FROM devices WHERE uuid = $1 LIMIT 1")
-        .bind(agent_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
+    sqlx::query_scalar::<_, String>(
+        "SELECT uuid FROM devices WHERE uuid = $1 AND tenant_id = $2 LIMIT 1",
+    )
+    .bind(agent_id)
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -228,30 +238,29 @@ struct AgentResult {
     done: bool,
 }
 
-async fn persist_result(state: &AppState, r: AgentResult) -> anyhow::Result<()> {
-    let resolved_uuid = resolve_device_uuid(state, &r.device_uuid)
+async fn persist_result(state: &AppState, tenant_id: Uuid, r: AgentResult) -> anyhow::Result<()> {
+    let resolved_uuid = resolve_device_uuid(state, tenant_id, &r.device_uuid)
         .await
         .unwrap_or(r.device_uuid);
 
-    // Get device id from uuid
     let device_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM devices WHERE uuid = $1",
+        "SELECT id FROM devices WHERE uuid = $1 AND tenant_id = $2",
     )
     .bind(&resolved_uuid)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await?;
 
     let Some(device_id) = device_id else { return Ok(()) };
 
-    // Upsert result (append output)
     sqlx::query(
         r#"
         INSERT INTO exec_results (job_id, device_id, output, exit_code, done, finished_at)
         VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 THEN now() ELSE NULL END)
         ON CONFLICT (job_id, device_id) DO UPDATE SET
-            output     = exec_results.output || EXCLUDED.output,
-            exit_code  = COALESCE(EXCLUDED.exit_code, exec_results.exit_code),
-            done       = EXCLUDED.done,
+            output      = exec_results.output || EXCLUDED.output,
+            exit_code   = COALESCE(EXCLUDED.exit_code, exec_results.exit_code),
+            done        = EXCLUDED.done,
             finished_at = CASE WHEN EXCLUDED.done THEN now() ELSE exec_results.finished_at END
         "#,
     )

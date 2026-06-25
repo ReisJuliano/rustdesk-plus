@@ -6,6 +6,9 @@ use std::{
 };
 use uuid::Uuid;
 
+// Bump ao mudar installer/main.go ou agent/main.go — força rebuild do cache.
+const INSTALLER_BUILD: &str = "5";
+
 fn run(command: &mut Command, description: &str) -> anyhow::Result<()> {
     let output = command.output()?;
     if output.status.success() {
@@ -22,10 +25,7 @@ fn copy_file(source: impl AsRef<Path>, target: impl AsRef<Path>) -> anyhow::Resu
     Ok(())
 }
 
-// Bump whenever installer/main.go ou agent/main.go mudar — força rebuild do cache.
-const INSTALLER_BUILD: &str = "4";
-
-pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
+pub fn build(config: &ServerConfig, tenant_id: Uuid, rustdesk_password: &str) -> anyhow::Result<PathBuf> {
     if config.server_ip.trim().is_empty()
         || config.server_key.trim().is_empty()
         || config.api_url.trim().is_empty()
@@ -33,17 +33,22 @@ pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
         anyhow::bail!("configure o servidor antes de baixar o instalador");
     }
 
-    let output_path = PathBuf::from(
+    let base_path = PathBuf::from(
         std::env::var("INSTALLER_PATH")
             .unwrap_or_else(|_| "/app/generated/rustdesk-installer.exe".to_string()),
     );
-    let metadata_path = output_path
+    let generated_dir = base_path
         .parent()
-        .unwrap_or_else(|| Path::new("/app/generated"))
-        .join("installer-config.json");
+        .unwrap_or_else(|| Path::new("/app/generated"));
+
+    let output_path = generated_dir.join(format!("installer-{tenant_id}.exe"));
+    let metadata_path = generated_dir.join(format!("installer-config-{tenant_id}.json"));
+
     let expected_metadata = {
         let mut m = serde_json::to_value(config)?;
+        m["rustdesk_password"] = serde_json::Value::String(rustdesk_password.to_string());
         m["_build"] = serde_json::Value::String(INSTALLER_BUILD.to_string());
+        m["_tenant"] = serde_json::Value::String(tenant_id.to_string());
         serde_json::to_vec(&m)?
     };
 
@@ -81,7 +86,10 @@ pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
     )?;
 
     let agent_exe = installer_dir.join("rustdesk-agent.exe");
-    let agent_ldflags = format!("-s -w -H=windowsgui -X main.apiURL={}", config.api_url);
+    let agent_ldflags = format!(
+        "-s -w -H=windowsgui -X main.apiURL={} -X main.tenantID={}",
+        config.api_url, tenant_id
+    );
     run(
         Command::new("go")
             .current_dir(&agent_dir)
@@ -102,8 +110,8 @@ pub fn build(config: &ServerConfig) -> anyhow::Result<PathBuf> {
     )?;
 
     let installer_ldflags = format!(
-        "-s -w -H=windowsgui -X main.serverIP={} -X main.serverKey={} -X main.apiURL={} -X main.unattendedPassword={}",
-        config.server_ip, config.server_key, config.api_url, config.rustdesk_password
+        "-s -w -H=windowsgui -X main.serverIP={} -X main.serverKey={} -X main.apiURL={} -X main.unattendedPassword={} -X main.tenantID={}",
+        config.server_ip, config.server_key, config.api_url, rustdesk_password, tenant_id
     );
     let temporary_output = work_root.join("rustdesk-installer.exe");
     run(
