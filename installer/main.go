@@ -409,6 +409,11 @@ func runInstall(hwnd uintptr) {
 		stopRustDeskProcesses()
 	}
 
+	// Limpa TODOS os diretórios de config antes de escrever o novo — garante que
+	// senhas e configurações antigas (inclusive no perfil SYSTEM) não sobrevivam.
+	status("Limpando configuração antiga...", 65)
+	clearRustDeskConfigDirs()
+
 	status("Aplicando configuração do servidor...", 70)
 	appData, _ := os.UserConfigDir()
 	configDir := filepath.Join(appData, "RustDesk", "config")
@@ -479,6 +484,24 @@ func applyRustDeskOptions() error {
 	return nil
 }
 
+// clearRustDeskConfigDirs apaga os diretórios de config do usuário atual E do
+// perfil SYSTEM antes de escrever os novos. Sem isso, arquivos de senha antigos
+// (permanent-password, etc.) ficam no disco e o serviço os usa ao subir.
+func clearRustDeskConfigDirs() {
+	appData, err := os.UserConfigDir()
+	if err == nil {
+		userCfg := filepath.Join(appData, "RustDesk", "config")
+		os.RemoveAll(userCfg)
+		os.MkdirAll(userCfg, 0755)
+	}
+	for _, dir := range []string{
+		`C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config`,
+		`C:\Windows\SysWOW64\config\systemprofile\AppData\Roaming\RustDesk\config`,
+	} {
+		os.RemoveAll(dir)
+	}
+}
+
 func stopRustDeskProcesses() {
 	// Para o serviço (pode falhar se não existir — ignoramos)
 	svcStop := exec.Command("sc", "stop", "RustDesk")
@@ -510,6 +533,7 @@ func propagateConfigToSystemProfile() {
 		`C:\Windows\SysWOW64\config\systemprofile\AppData\Roaming\RustDesk\config`,
 	}
 	for _, dst := range dsts {
+		os.RemoveAll(dst)
 		if err := os.MkdirAll(dst, 0755); err != nil {
 			continue
 		}
