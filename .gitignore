@@ -27,8 +27,8 @@ projeto.md
 PROJETO.md
 
 # Clones de referência (AGPL, não fazem parte do projeto)
-rustdesk-server/
-rustdesk-client/
+/rustdesk-server/
+/rustdesk-client/
 
 # Claude Code settings (pessoal)
 .claude/
