@@ -430,18 +430,17 @@ func runInstall(hwnd uintptr) {
 	if apiURL != "" {
 		fmt.Fprintf(&sb, "api-server = '%s'\n", apiURL)
 	}
+	// permanent-password é gravado direto no TOML — o RustDesk o armazena como
+	// texto puro em [options]. Não usamos rustdesk --password porque esse comando
+	// precisa do serviço rodando (IPC) e falharia em silêncio aqui.
+	if unattendedPassword != "" {
+		fmt.Fprintf(&sb, "permanent-password = '%s'\n", unattendedPassword)
+	}
 	if err := os.WriteFile(filepath.Join(configDir, "RustDesk2.toml"), []byte(sb.String()), 0644); err != nil {
 		fail("Erro ao salvar config: " + err.Error()); return
 	}
 	if err := applyRustDeskOptions(); err != nil {
 		fail("Erro ao aplicar a configuração no RustDesk: " + err.Error()); return
-	}
-
-	if unattendedPassword != "" {
-		status("Configurando senha de acesso remoto...", 76)
-		if err := setRustDeskPassword(unattendedPassword); err != nil {
-			fail("Erro ao definir a senha: " + err.Error()); return
-		}
 	}
 
 	// Copia toda a config do perfil do usuário atual para o perfil SYSTEM,
