@@ -266,6 +266,8 @@ function RegularDashboard() {
 
 export default function DashboardPage() {
   const user = getStoredUser();
-  if (user && isSuperAdmin(user)) return <SuperAdminDashboard />;
+  // Super admin sem cliente ativo → visão global
+  // Super admin COM cliente ativo → dashboard do cliente (igual ao que o cliente veria)
+  if (user && isSuperAdmin(user) && !getActiveTenantId()) return <SuperAdminDashboard />;
   return <RegularDashboard />;
 }

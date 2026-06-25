@@ -31,7 +31,11 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
-  const [activeTenantName, setActiveTenantName] = useState<string | null>(null);
+  // Inicializa direto do sessionStorage para não ter flash de nav errado na primeira render
+  const [activeTenantName, setActiveTenantName] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return sessionStorage.getItem("activeTenantName");
+  });
   const user = getStoredUser();
 
   useEffect(() => {
