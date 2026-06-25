@@ -37,9 +37,17 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   useEffect(() => {
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (!token) { router.replace("/login"); return; }
+
+    // Super admin sem tenant ativo só pode acessar a página de clientes
+    const stored = getStoredUser();
+    if (stored && isSuperAdmin(stored) && !getActiveTenantId() && pathname !== "/tenants") {
+      router.replace("/tenants");
+      return;
+    }
+
     setReady(true);
     setActiveTenantName(getActiveTenantName());
-  }, [router]);
+  }, [router, pathname]);
 
   // Atualiza o banner ao voltar de navegações
   useEffect(() => {
