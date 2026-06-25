@@ -2,7 +2,7 @@
 
 # RustDesk Plus
 
-**Painel de gerenciamento self-hosted para RustDesk — com servidor embutido**
+**Painel de gerenciamento self-hosted multi-tenant para RustDesk — com servidor embutido**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org)
@@ -12,7 +12,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org)
 
 Suba o servidor RustDesk completo (`hbbs` + `hbbr`) e o painel de administração com um único comando.
-Gerencie todos os seus dispositivos em tempo real: filiais, tags, execução remota de comandos e instalador `.exe` gerado automaticamente.
+Gerencie múltiplos clientes (tenants) em um único servidor — cada um com seus próprios dispositivos, usuários, filiais e senha de acesso remoto.
 
 </div>
 
@@ -20,15 +20,14 @@ Gerencie todos os seus dispositivos em tempo real: filiais, tags, execução rem
 
 ## O que é o RustDesk Plus
 
-O RustDesk Plus é uma solução self-hosted completa que combina:
+O RustDesk Plus é uma solução self-hosted multi-tenant que combina:
 
-- **Servidor RustDesk** (`hbbs` + `hbbr`) — embutido no stack Docker, nenhuma instalação separada necessária
-- **API de gerenciamento** (`plus-api`) — backend Rust/Axum que se comunica com os clientes RustDesk e expõe uma API REST para o painel
-- **Dashboard web** — interface Next.js 15 para administrar dispositivos, usuários, filiais e executar comandos remotos
-- **Agente Windows** — processo leve em Go que mantém conexão WebSocket permanente com o servidor, habilitando o terminal remoto
-- **Instalador `.exe`** — gerado automaticamente com as configurações do seu servidor; basta executar em cada PC
-
-A arquitetura mantém o `hbbs`/`hbbr` sem modificações (AGPL-3.0), enquanto o `plus-api` é um serviço completamente independente que implementa as rotas HTTP opcionais chamadas pelo cliente RustDesk quando a opção `api-server` está configurada.
+- **Servidor RustDesk** (`hbbs` + `hbbr`) — embutido no stack Docker, compartilhado entre todos os clientes
+- **Multi-tenancy** — cada cliente enxerga apenas seus próprios dispositivos, usuários e configurações
+- **API de gerenciamento** (`plus-api`) — backend Rust/Axum com isolamento por tenant
+- **Dashboard web** — interface Next.js 15 com painel separado para super admin e para cada cliente
+- **Agente Windows** — processo leve em Go que mantém conexão WebSocket permanente com o servidor
+- **Instalador `.exe` por cliente** — gerado automaticamente com senha exclusiva por tenant
 
 ---
 
@@ -36,20 +35,20 @@ A arquitetura mantém o `hbbs`/`hbbr` sem modificações (AGPL-3.0), enquanto o 
 
 | Funcionalidade | Descrição |
 |---|---|
+| **Multi-tenant** | N clientes num único servidor; dados, usuários e senha completamente isolados |
+| **Super Admin** | Visão global de todos os clientes; acesso ao painel de cada um com um clique |
 | **Servidor RustDesk embutido** | `hbbs` e `hbbr` sobem no mesmo `docker compose up` |
+| **Instalador por cliente** | `.exe` gerado com a senha exclusiva do cliente; cache invalidado automaticamente |
+| **Senha de acesso remoto** | 8 chars A-Z0-9, gerada automaticamente por tenant, visível nas Configurações |
 | **Auto-registro de dispositivos** | PCs aparecem no painel automaticamente ao conectar ao servidor |
-| **Auto-filial por IP** | Dispositivos na mesma rede herdam a filial automaticamente |
-| **Dashboard em tempo real** | Totais de dispositivos, online/offline, filiais e usuários |
-| **Cards de dispositivos** | Status, IP, SO detectado, RustDesk ID, uptime online, tags |
-| **3 modos de visualização** | Grid / Lista / Compacto |
-| **Tags coloridas** | Tags ilimitadas para organizar e filtrar qualquer dispositivo |
-| **Filiais hierárquicas** | Estrutura de filiais com suporte a pai/filho |
-| **Terminal remoto** | Execute CMD/PowerShell em múltiplos dispositivos via WebSocket |
-| **Seleção por tag** | Envie um comando para todos os dispositivos de uma tag de uma vez |
-| **Instalador `.exe` automático** | Gerado no servidor com suas configurações; janela Win32 nativa |
-| **Controle de usuários** | Papéis: `admin`, `operator`, `viewer` |
-| **Favoritos** | Marque dispositivos importantes |
-| **Setup guiado** | Primeiro acesso cria o admin e configura o servidor pelo browser |
+| **Auto-filial por IP** | Dispositivos na mesma rede herdam a filial automaticamente (por tenant) |
+| **Dashboard em tempo real** | Stats por cliente: dispositivos, online/offline, filiais, usuários |
+| **3 modos de visualização** | Grid / Lista / Compacto na página de Dispositivos |
+| **Tags coloridas** | Tags ilimitadas por tenant para organizar e filtrar dispositivos |
+| **Filiais hierárquicas** | Estrutura de filiais com suporte a pai/filho, por tenant |
+| **Terminal remoto** | Execute CMD/PowerShell em múltiplos dispositivos; super admin filtra por cliente |
+| **Controle de usuários** | Papéis: `admin`, `operator`, `viewer` por tenant |
+| **Serviço Windows** | Instalador configura RustDesk como serviço auto-start no Windows |
 
 ---
 
@@ -58,39 +57,37 @@ A arquitetura mantém o `hbbs`/`hbbr` sem modificações (AGPL-3.0), enquanto o 
 ```
  Cliente RustDesk (oficial, sem modificações)
          │
-         │  /api/heartbeat  ─────────────────────────────────────────┐
-         │  /api/sysinfo    ─────────────────────────────────────────┤
-         │  (opcionais, só se api-server estiver configurado)        │
-         │                                                           ▼
-         │  21116 (sinalização)      ┌──────────────────────────────────────┐
-         ├──────────────────────────►│           plus-api                   │
-         │                           │         (Rust / Axum)                │
-         │  21117 (relay)            │                                      │
-         └──────────────────────────►│  • auto-registro + auto-filial       │
-                                     │  • CRUD devices / branches / users   │
-  ┌──────────────────────┐           │  • tags + execução remota            │
-  │  hbbs (rendezvous)   │           │  • geração do instalador .exe        │
-  │  hbbr (relay)        │           │  • PostgreSQL 16                     │
-  │                      │           └─────────────────┬────────────────────┘
-  │  RustDesk Server     │                             │
-  │  (AGPL-3.0)          │                             │  REST / JSON
-  │  portas: 21115–21119 │                             ▼
-  └──────────────────────┘           ┌──────────────────────────────────────┐
-              ▲                      │           dashboard                  │
-              │ mesma rede Docker    │       (Next.js 15 / React 19)        │
-              └──────────────────────┤  porta 80 (via nginx gateway)        │
-                                     └──────────────────────────────────────┘
-
+         │  /api/heartbeat?tid=<tenant_id>  ──────────────────────────────┐
+         │  /api/sysinfo?tid=<tenant_id>    ──────────────────────────────┤
+         │                                                                 │
+         │  21116 (sinalização)      ┌──────────────────────────────────────────┐
+         ├──────────────────────────►│             plus-api                     │
+         │                           │           (Rust / Axum)                  │
+         │  21117 (relay)            │                                          │
+         └──────────────────────────►│  • multi-tenant (tenant_id em tudo)      │
+                                     │  • auto-registro + auto-filial           │
+  ┌──────────────────────┐           │  • CRUD devices / branches / users       │
+  │  hbbs (rendezvous)   │           │  • tags + execução remota                │
+  │  hbbr (relay)        │           │  • instalador .exe por tenant            │
+  │  (AGPL-3.0)          │           │  • PostgreSQL 16                         │
+  │  portas: 21115–21119 │           └──────────────────────┬───────────────────┘
+  └──────────────────────┘                                  │
+              ▲                                             │  REST / JSON
+              │ mesma rede Docker                           ▼
+              └─────────────────────────┌──────────────────────────────────────┐
+                                        │           dashboard                  │
+                                        │       (Next.js 15 / React 19)        │
+                                        │  porta 80 (via nginx gateway)        │
+                                        └──────────────────────────────────────┘
   PC gerenciado
   ┌───────────────────────────────┐
-  │  rustdesk-agent.exe (Go)      │
-  │  WebSocket ─► /ws/agent       │──────────────────────► plus-api :21114
-  │  executa CMD/PowerShell       │
+  │  rustdesk-agent.exe (Go)      │──────────────────────► plus-api :21114
+  │  WebSocket /ws/agent?tid=...  │
   └───────────────────────────────┘
 ```
 
-O gateway Nginx (incluído no Compose) roteia:
-- `/admin/*`, `/api/*`, `/ws/*`, `/setup/*`, `/health` → `plus-api:21114`
+O gateway Nginx roteia:
+- `/admin/*`, `/api/*`, `/ws/*`, `/setup/*`, `/health`, `/super/*` → `plus-api:21114`
 - Todo o resto → `dashboard:3000`
 
 ---
@@ -109,11 +106,11 @@ O gateway Nginx (incluído no Compose) roteia:
 
 ---
 
-## Instalacao Rapida
+## Instalação Rápida
 
-### Pre-requisitos
+### Pré-requisitos
 
-- Servidor Linux com Docker Engine e Docker Compose v2
+- Servidor Linux com Docker Engine e Docker Compose v2 (ou `docker-compose` standalone)
 - Portas abertas: `80/tcp` (ou outra via `WEB_PORT`), `21115/tcp`, `21116/tcp+udp`, `21117/tcp`, `21118/tcp`, `21119/tcp`
 
 ### Via script (recomendado)
@@ -126,15 +123,13 @@ chmod +x install.sh
 ```
 
 O script `install.sh`:
-1. Instala Docker Engine e Docker Compose se ainda nao estiverem presentes (requer `apt-get`)
-2. Detecta o IP publico do servidor automaticamente
-3. Gera `POSTGRES_PASSWORD` e `JWT_SECRET` aleatorios com `openssl rand -hex 32`
+1. Instala Docker Engine e Docker Compose se ainda não estiverem presentes (detecta `docker compose` e `docker-compose`)
+2. Detecta o IP público do servidor automaticamente
+3. Gera `POSTGRES_PASSWORD` e `JWT_SECRET` aleatórios com `openssl rand -hex 32`
 4. Cria o arquivo `.env` com todos os valores
-5. Cria os diretorios de volumes (`data/rustdesk`, `data/deployment`, `data/generated`, `plus-data/postgres`)
+5. Cria os diretórios de volumes
 6. Executa `docker compose up -d --build`
-7. Exibe a URL de acesso e a lista de portas para liberar no firewall
-
-Ao final, acesse a URL exibida no terminal. O **primeiro acesso** abre o wizard de configuracao que cria o usuario administrador.
+7. Exibe a URL de acesso
 
 ### Manual (passo a passo)
 
@@ -142,7 +137,6 @@ Ao final, acesse a URL exibida no terminal. O **primeiro acesso** abre o wizard 
 git clone https://github.com/ReisJuliano/rustdesk-plus.git
 cd rustdesk-plus
 
-# Crie o arquivo de configuracao
 cat > .env <<EOF
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 JWT_SECRET=$(openssl rand -hex 32)
@@ -151,180 +145,91 @@ PUBLIC_HOST=IP_OU_DOMINIO_DO_SERVIDOR
 PUBLIC_API_URL=http://IP_OU_DOMINIO_DO_SERVIDOR
 EOF
 
-# Crie os diretorios de dados
 mkdir -p data/rustdesk data/deployment data/generated plus-data/postgres
-
-# Grave o host para o hbbs
 echo -n "IP_OU_DOMINIO_DO_SERVIDOR" > data/deployment/public_host
 
-# Suba tudo
 docker compose up -d --build
 ```
 
-Acesse `http://IP_DO_SERVIDOR` e complete o setup pelo browser.
+---
+
+## Primeiro Acesso — Setup
+
+Ao abrir o painel pela primeira vez, um wizard guiado solicita:
+
+| Campo | Descrição |
+|---|---|
+| **Seu nome** | Nome do super admin |
+| **Nome da empresa (primeiro cliente)** | Cria automaticamente o primeiro tenant |
+| **IP / domínio público** | IP do servidor para o hbbs e o instalador |
+| **URL pública da API** | URL base da API (ex: `http://meuservidor.com`) |
+| **Email e senha** | Credenciais do super admin (mínimo 8 chars) |
+
+Após o setup, o super admin tem acesso ao painel completo.
 
 ---
 
-## Variaveis de Ambiente
+## Papéis de Usuário
 
-As variaveis abaixo vao no arquivo `.env` na raiz do projeto.
+| Papel | Descrição |
+|---|---|
+| `super_admin` | Acesso global — gerencia todos os tenants, vê o painel de qualquer cliente |
+| `admin` | Administrador de um tenant — CRUD completo dentro do seu tenant |
+| `operator` | Operador — pode executar comandos e ver dispositivos |
+| `viewer` | Somente leitura |
 
-| Variavel | Obrigatorio | Padrao | Descricao |
+O `super_admin` não pertence a nenhum tenant específico. Ao entrar no painel de um cliente, opera com o contexto daquele tenant (header `X-Tenant-Id` enviado automaticamente).
+
+---
+
+## Gestão de Clientes (Multi-tenant)
+
+### Criar novo cliente
+
+1. Logue como super admin
+2. Menu **Clientes** → **+ Novo cliente**
+3. Preencha nome e slug
+4. O sistema gera automaticamente uma senha de acesso remoto exclusiva para o cliente
+
+### Acessar o painel de um cliente
+
+1. Menu **Clientes** → clique em **Entrar** no card do cliente
+2. Um banner amarelo no topo indica qual cliente você está visualizando
+3. Todo o painel (dispositivos, terminal, filiais, usuários, configuração) fica scoped para esse cliente
+4. Clique em **Sair do cliente** para voltar à visão global
+
+### Adicionar PCs ao cliente
+
+1. Entre no painel do cliente (passo acima)
+2. Menu **Configuração** → **Baixar instalador (.exe)**
+3. Execute o `.exe` nos PCs do cliente como Administrador
+
+O instalador faz automaticamente:
+- Baixa e instala o RustDesk oficial (se necessário)
+- Configura o servidor (IP, chave pública, api-server com tenant_id)
+- Define a senha de acesso remoto exclusiva do cliente
+- Instala o RustDesk como serviço Windows (auto-start, sobrevive a reboots)
+- Instala o `rustdesk-agent.exe` como tarefa agendada do Windows
+
+### Senha de acesso remoto
+
+Cada cliente tem uma senha de 8 caracteres (A-Z0-9), gerada automaticamente.
+
+- **Visível em**: Configuração → "Senha Padrão de Acesso Remoto"
+- **Embutida no instalador**: o `.exe` de cada cliente já vem com a senha configurada
+- **Usada na conexão**: o botão "Conectar" no dashboard abre `rustdesk://<id>?password=<senha>` automaticamente
+
+---
+
+## Variáveis de Ambiente
+
+| Variável | Obrigatório | Padrão | Descrição |
 |---|---|---|---|
-| `JWT_SECRET` | sim | — | Segredo para assinatura JWT (minimo 32 caracteres) |
+| `JWT_SECRET` | sim | — | Segredo para assinatura JWT (mínimo 32 caracteres) |
 | `POSTGRES_PASSWORD` | sim | `plusapi` | Senha do PostgreSQL |
-| `PUBLIC_HOST` | recomendado | — | IP ou dominio publico do servidor (usado pelo hbbs e pelo setup) |
-| `PUBLIC_API_URL` | recomendado | — | URL publica da API (ex: `http://meuservidor.com`) |
-| `WEB_PORT` | nao | `80` | Porta HTTP do gateway Nginx |
-
-Variaveis internas dos containers (nao precisam estar no `.env`):
-
-| Variavel | Padrao | Descricao |
-|---|---|---|
-| `DATABASE_URL` | gerada pelo Compose | Connection string PostgreSQL |
-| `BIND_ADDR` | `0.0.0.0:21114` | Endereco de bind da plus-api |
-| `RUSTDESK_KEY_PATH` | `/rustdesk-data/id_ed25519.pub` | Caminho da chave publica do hbbr |
-| `DEPLOYMENT_HOST_PATH` | `/deployment/public_host` | Arquivo com o IP publico para o hbbs |
-| `INSTALLER_PATH` | `/generated/rustdesk-installer.exe` | Caminho do instalador gerado |
-
----
-
-## Como Adicionar Dispositivos
-
-### Opcao A — Instalador automatico (recomendado)
-
-1. No dashboard, va em **Configuracoes**
-2. Preencha o IP do servidor e a chave publica (lidos automaticamente se o servidor ja estiver rodando)
-3. Clique em **Baixar instalador.exe**
-4. Execute o arquivo em cada PC Windows como **Administrador**
-5. O dispositivo aparece no painel em instantes
-
-O instalador faz tudo automaticamente:
-- Baixa o RustDesk oficial caso nao esteja instalado
-- Configura `RustDesk2.toml` apontando para o seu servidor (IP, chave, api-server)
-- Instala e inicia o `rustdesk-agent.exe` como tarefa agendada do Windows
-- Exibe janela Win32 nativa com barra de progresso (sem dependencias externas)
-
-O `.exe` e gerado no container `plus-api` na primeira vez que voce clicar em "Baixar" (ou quando as configuracoes mudarem). O build usa cross-compilation Go dentro do container — nao e necessario nenhuma ferramenta no seu PC.
-
-### Opcao B — Configuracao manual do RustDesk
-
-Edite `%APPDATA%\RustDesk\config\RustDesk2.toml` em cada PC:
-
-```toml
-rendezvous_server = 'SEU_SERVIDOR:21116'
-nat_type = 1
-serial = 0
-
-[options]
-key = 'CHAVE_PUBLICA_DO_SERVIDOR'
-custom-rendezvous-server = 'SEU_SERVIDOR'
-relay-server = 'SEU_SERVIDOR'
-api-server = 'http://SEU_SERVIDOR'
-```
-
-Reinicie o RustDesk. O dispositivo aparece no painel em ate 30 segundos.
-
-> A chave publica esta em `data/rustdesk/id_ed25519.pub` apos a primeira execucao do hbbr.
-
----
-
-## Agente de Execucao Remota
-
-O terminal remoto do dashboard requer o `rustdesk-agent.exe` instalado em cada PC.
-Ao usar o instalador automatico (Opcao A acima), o agente ja e instalado e configurado automaticamente.
-
-Para instalar o agente manualmente:
-
-```bash
-# Cross-compile de Linux ou macOS para Windows
-cd agent
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
-  -ldflags "-s -w -H=windowsgui -X main.apiURL=http://SEU_SERVIDOR" \
-  -o rustdesk-agent.exe .
-```
-
-Instale no PC como tarefa agendada (Administrator):
-
-```powershell
-$dir = "C:\Program Files\RustDesk Plus"
-New-Item -ItemType Directory -Force $dir
-Copy-Item rustdesk-agent.exe "$dir\rustdesk-agent.exe"
-schtasks /create /tn "RustDeskPlusAgent" /tr "$dir\rustdesk-agent.exe" `
-  /sc onstart /ru SYSTEM /f
-schtasks /run /tn "RustDeskPlusAgent"
-```
-
-O agente:
-- Conecta ao `plus-api` via WebSocket (`/ws/agent?uuid=...&hostname=...&rustdesk_id=...`)
-- Registra o dispositivo no banco automaticamente
-- Aguarda comandos do painel e retorna o output linha a linha em tempo real
-- Reconecta automaticamente em caso de queda
-
----
-
-## Deploy em Producao
-
-### Com dominio proprio (HTTPS)
-
-O gateway Nginx embutido escuta na porta definida por `WEB_PORT` (padrao 80). Para HTTPS recomenda-se colocar um reverse proxy externo (Nginx, Caddy, Traefik) na frente.
-
-Exemplo com Nginx externo e Let's Encrypt:
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name painel.seudominio.com;
-
-    ssl_certificate     /etc/letsencrypt/live/seudominio.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/seudominio.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:80;
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        # Necessario para WebSocket (terminal remoto)
-        proxy_set_header Upgrade           $http_upgrade;
-        proxy_set_header Connection        $connection_upgrade;
-        proxy_read_timeout 3600s;
-    }
-}
-```
-
-Atualize o `.env` antes de rebuildar:
-
-```env
-PUBLIC_HOST=painel.seudominio.com
-PUBLIC_API_URL=https://painel.seudominio.com
-```
-
-```bash
-docker compose up -d --build
-```
-
-### Portas do servidor RustDesk
-
-| Porta | Protocolo | Servico |
-|---|---|---|
-| 21115 | TCP | hbbs — teste de tipo NAT |
-| 21116 | TCP+UDP | hbbs — registro e heartbeat de peers |
-| 21117 | TCP | hbbr — relay de conexao |
-| 21118 | TCP | hbbs — WebSocket (clientes web) |
-| 21119 | TCP | hbbr — WebSocket (clientes web) |
-
-Todas essas portas devem estar abertas no firewall do servidor.
-
-### Como o hbbs descobre o IP publico
-
-O container `hbbs` aguarda o arquivo `/deployment/public_host` ser gravado antes de iniciar.
-Esse arquivo e preenchido automaticamente pelo `plus-api` a partir de:
-1. A variavel `PUBLIC_HOST` do `.env` (na subida inicial)
-2. O campo "IP do servidor" salvo nas Configuracoes do painel
-
-Se o IP mudar, basta atualizar nas Configuracoes — o `hbbs` reinicia automaticamente.
+| `PUBLIC_HOST` | recomendado | — | IP ou domínio público do servidor |
+| `PUBLIC_API_URL` | recomendado | — | URL pública da API (ex: `http://meuservidor.com`) |
+| `WEB_PORT` | não | `80` | Porta HTTP do gateway Nginx |
 
 ---
 
@@ -333,280 +238,114 @@ Se o IP mudar, basta atualizar nas Configuracoes — o `hbbs` reinicia automatic
 ```
 rustdesk-plus/
 │
-├── compose.yaml                     # Ponto de entrada (inclui docker-compose.plus.yml)
-├── docker-compose.plus.yml          # Definicao dos 6 servicos
-├── install.sh                       # Script de instalacao one-liner
+├── compose.yaml                     # Ponto de entrada
+├── docker-compose.plus.yml          # Definição dos 6 serviços
+├── install.sh                       # Script de instalação one-liner
 │
 ├── deploy/
-│   ├── nginx.conf                   # Gateway: roteia /admin /api /ws /setup -> plus-api
+│   ├── nginx.conf                   # Gateway: roteia /admin /api /ws /setup /super → plus-api
 │   └── rustdesk-server/
 │       ├── Dockerfile               # Extrai hbbs/hbbr da imagem oficial + Alpine
 │       └── hbbs-entrypoint.sh       # Aguarda o IP; reinicia hbbs se o IP mudar
 │
 ├── plus-api/                        # Backend Rust
-│   ├── Dockerfile                   # Multi-stage: rust:slim -> golang:bookworm
+│   ├── Dockerfile
 │   ├── Cargo.toml
 │   ├── migrations/
-│   │   ├── 0001_init.sql            # branches, users, devices, sessions_log
+│   │   ├── 0001_init.sql
 │   │   ├── 0002_add_device_fields.sql
-│   │   ├── 0003_device_enhancements.sql  # ip_address, online_since
-│   │   └── 0004_tags_and_exec.sql   # tags, device_tags, exec_jobs, exec_results
+│   │   ├── 0003_device_enhancements.sql
+│   │   ├── 0004_tags_and_exec.sql
+│   │   └── 0005_multi_tenancy.sql   # tenants, tenant_config, tenant_id em tudo
 │   └── src/
-│       ├── main.rs                  # Bootstrap admin, offline sweeper, bind
-│       ├── auth.rs                  # Argon2id + JWT HS256
-│       ├── config.rs                # Leitura/escrita server_config + chave ed25519
-│       ├── installer.rs             # Build do .exe via go build cross-compile
-│       ├── models.rs                # Structs SQLx
-│       ├── state.rs                 # AppState { db, agents, installer_build }
-│       ├── error.rs                 # AppError -> IntoResponse
+│       ├── main.rs
+│       ├── auth.rs                  # JWT com tenant_id; super_admin role
+│       ├── config.rs                # Config global + senha por tenant
+│       ├── installer.rs             # Build .exe por tenant com cache
+│       ├── models.rs
+│       ├── state.rs                 # Mapa de agentes com chave {tenant_id}:{uuid}
 │       └── routes/
-│           ├── admin.rs             # CRUD + stats + tags + exec + download instalador
-│           ├── client.rs            # /api/heartbeat /api/sysinfo (protocolo RustDesk)
-│           ├── agent.rs             # WebSocket /ws/agent
-│           └── setup.rs             # /setup/status + /setup (primeiro acesso)
+│           ├── admin.rs             # CRUD scoped por tenant; /super/tenants para super admin
+│           ├── client.rs            # /api/heartbeat e /api/sysinfo com tenant_id
+│           ├── agent.rs             # WebSocket /ws/agent com tenant_id
+│           └── setup.rs             # Cria primeiro tenant + super admin
 │
 ├── dashboard/                       # Frontend Next.js 15
-│   ├── Dockerfile
-│   └── src/
-│       ├── lib/
-│       │   ├── api.ts               # Cliente HTTP tipado (todos os endpoints)
-│       │   └── auth.ts              # Token em localStorage
-│       └── app/
-│           ├── login/               # Tela de login
-│           └── (protected)/
-│               ├── layout.tsx       # Navbar + guarda de autenticacao
-│               ├── dashboard/       # Stats em tempo real
-│               ├── devices/         # Cards + modal de edicao + tags + 3 views
-│               ├── terminal/        # Execucao CMD/PowerShell em massa
-│               ├── branches/        # CRUD de filiais e tags (abas)
-│               ├── users/           # CRUD de usuarios
-│               └── settings/        # Configuracao do servidor + download do instalador
+│   └── src/app/(protected)/
+│       ├── tenants/                 # Gestão de clientes (super admin)
+│       ├── dashboard/               # Visão global (super admin) ou por tenant
+│       ├── devices/                 # Dispositivos do tenant ativo
+│       ├── terminal/                # Terminal com seletor de cliente (super admin)
+│       ├── branches/                # Filiais & Tags do tenant
+│       ├── users/                   # Usuários do tenant
+│       └── settings/                # Config global (super admin) + senha do tenant
 │
-├── agent/                           # Agente Windows (Go)
-│   ├── main.go                      # WebSocket + exec CMD/PowerShell + reconnect
-│   └── go.mod
-│
+├── agent/                           # Agente Windows (Go) — envia tenant_id no WS
 ├── installer/                       # Instalador Windows (Go + Win32)
-│   ├── main.go                      # Janela nativa, barra de progresso, agente embutido
-│   └── go.mod
-│
-├── data/                            # Volumes de runtime (gitignore)
-│   ├── rustdesk/                    # Chaves ed25519 do hbbr, banco do hbbs
-│   ├── deployment/                  # public_host (compartilhado com hbbs)
-│   └── generated/                   # rustdesk-installer.exe gerado
-│
-├── plus-data/
-│   └── postgres/                    # Dados do PostgreSQL
-│
-├── rustdesk-server/                 # Submodulo — codigo-fonte do hbbs/hbbr (referencia)
-└── rustdesk-client/                 # Submodulo — codigo-fonte do cliente (referencia)
+└── data/                            # Volumes de runtime (gitignore)
 ```
 
 ---
 
 ## API Reference
 
-Todas as rotas autenticadas exigem o header:
-
+Todas as rotas autenticadas exigem:
 ```
 Authorization: Bearer <token>
 ```
 
-O token e obtido em `POST /admin/login` ou `POST /setup`.
-
-### Autenticacao e Setup
-
-| Metodo | Rota | Body | Descricao |
-|---|---|---|---|
-| `POST` | `/admin/login` | `{ email, password }` | Login de administrador |
-| `GET` | `/setup/status` | — | Verifica se o sistema ja foi configurado |
-| `POST` | `/setup` | `{ email, password, name, server_ip, api_url }` | Primeiro acesso: cria admin |
-| `GET` | `/health` | — | Health check (`ok`) |
-
-### Dispositivos
-
-| Metodo | Rota | Descricao |
-|---|---|---|
-| `GET` | `/admin/devices` | Lista — query: `branch_id`, `search`, `online`, `favorite` |
-| `GET` | `/admin/devices/:id` | Detalhes do dispositivo |
-| `PATCH` | `/admin/devices/:id` | `{ alias?, description? }` |
-| `DELETE` | `/admin/devices/:id` | Remove |
-| `POST` | `/admin/devices/:id/branch` | `{ branch_id }` — atribui filial |
-| `POST` | `/admin/devices/:id/favorite` | Toggle favorito |
-| `GET` | `/admin/devices/:id/tags` | Lista tags do dispositivo |
-| `POST` | `/admin/devices/:id/tags` | `{ tag_id }` — adiciona tag |
-| `DELETE` | `/admin/devices/:id/tags/:tag_id` | Remove tag do dispositivo |
-| `GET` | `/admin/device-tags` | Todas as relacoes device <-> tag |
-
-### Tags
-
-| Metodo | Rota | Descricao |
-|---|---|---|
-| `GET` | `/admin/tags` | Lista todas as tags |
-| `POST` | `/admin/tags` | `{ name, color }` — cria tag |
-| `DELETE` | `/admin/tags/:id` | Remove tag |
-
-### Filiais
-
-| Metodo | Rota | Descricao |
-|---|---|---|
-| `GET` | `/admin/branches` | Lista filiais |
-| `POST` | `/admin/branches` | `{ name, parent_id? }` — cria filial |
-| `DELETE` | `/admin/branches/:id` | Remove filial |
-
-### Usuarios
-
-| Metodo | Rota | Descricao |
-|---|---|---|
-| `GET` | `/admin/users` | Lista usuarios |
-| `POST` | `/admin/users` | `{ email, password, name, role }` — cria usuario |
-| `DELETE` | `/admin/users/:id` | Remove usuario |
-
-Papeis validos para `role`: `admin`, `operator`, `viewer`.
-
-### Sistema
-
-| Metodo | Rota | Descricao |
-|---|---|---|
-| `GET` | `/admin/stats` | `{ total_devices, online_devices, offline_devices, total_branches, total_users }` |
-| `GET` | `/admin/server-config` | Le configuracao do servidor |
-| `POST` | `/admin/server-config` | `{ server_ip, server_key, api_url }` — salva |
-| `GET` | `/admin/installer` | Download do `rustdesk-installer.exe` (gerado sob demanda) |
-
-### Terminal Remoto
-
-| Metodo | Rota | Descricao |
-|---|---|---|
-| `POST` | `/admin/exec` | `{ cmd, powershell?, targets?, tag_id? }` — dispara comando |
-| `GET` | `/admin/exec/:job_id` | Resultados por dispositivo (polling) |
-| `WS` | `/ws/agent` | Conexao do agente — query: `uuid`, `hostname?`, `rustdesk_id?`, `os?` |
-
-### Rotas do protocolo RustDesk (cliente oficial)
-
-| Metodo | Rota | Descricao |
-|---|---|---|
-| `POST` | `/api/heartbeat` | Auto-registro, captura IP, heranca de filial por IP |
-| `POST` | `/api/sysinfo` | Atualiza hostname, SO, IP do dispositivo |
-| `POST` | `/api/sysinfo_ver` | Retorna versao (stub: `"1"`) |
-| `GET` | `/api/login-options` | Retorna `[]` |
-| `POST` | `/api/login` | Stub (login de conta nao habilitado) |
-| `POST` | `/api/logout` | Stub |
-| `POST` | `/api/currentUser` | Stub |
-| `POST` | `/api/ab/get` | Address book (stub: `{"data":"[]"}`) |
-| `POST` | `/api/ab` | Address book set (stub) |
-
----
-
-## Seguranca
-
-- **Senhas** armazenadas com Argon2id (OWASP recomendado, resistente a ataques de GPU)
-- **JWT HS256** com expiracao de 7 dias; hash de senha nunca serializado nas respostas
-- **Roles** `admin` / `operator` / `viewer` com controle de acesso por papel
-- **IP real** extraido de `X-Forwarded-For` / `X-Real-IP` (compativel com Nginx)
-- **`JWT_SECRET`** e **`POSTGRES_PASSWORD`** gerados com `openssl rand -hex 32` pelo `install.sh`
-- O setup (`/setup`) bloqueia novas requisicoes apos o primeiro administrador ser criado
-
-Boas praticas para producao:
-- Nunca exponha a porta `21114` diretamente; deixe o Nginx fazer o proxy
-- Use HTTPS com certificado valido (Let's Encrypt / Certbot)
-- Mantenha o `.env` fora do controle de versao (esta no `.gitignore`)
-- Rotacione o `JWT_SECRET` periodicamente (invalida todos os tokens ativos)
-
----
-
-## Banco de Dados
-
-O esquema e criado automaticamente pelas migrations SQLx na inicializacao do `plus-api`.
-
+Rotas de tenant (admin/operator/viewer) exigem adicionalmente, quando chamadas por super admin:
 ```
-branches          — filiais (hierarquicas via parent_id)
-users             — administradores/operadores/viewers
-user_branch_access — acesso de usuarios a filiais especificas
-devices           — dispositivos registrados (auto-cadastro via heartbeat)
-sessions_log      — historico de sessoes (para futuras implementacoes)
-tags              — tags coloridas
-device_tags       — relacao N:N entre devices e tags
-exec_jobs         — trabalhos de execucao remota
-exec_results      — resultados por dispositivo (saida acumulada + exit code)
-server_config     — configuracao do servidor (server_ip, server_key, api_url)
+X-Tenant-Id: <uuid-do-tenant>
 ```
 
+### Super Admin
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/super/tenants` | Lista todos os tenants com stats |
+| `POST` | `/super/tenants` | `{ name, slug }` — cria tenant |
+| `DELETE` | `/super/tenants/:id` | Remove tenant e todos os dados (cascade) |
+
+### Autenticação e Setup
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `POST` | `/admin/login` | `{ email, password }` |
+| `GET` | `/setup/status` | Verifica se o sistema já foi configurado |
+| `POST` | `/setup` | `{ email, password, name, server_ip, api_url, tenant_name }` |
+| `GET` | `/health` | Health check |
+
+### Dispositivos, Usuários, Filiais, Tags, Exec
+
+Todas as rotas `/admin/*` já documentadas na v1.0 continuam funcionando, agora filtradas por tenant automaticamente.
+
 ---
 
-## Desenvolvimento Local
-
-### Requisitos
-
-- Docker Desktop (WSL2 no Windows)
-- Go 1.24+ (para o agente/instalador)
-- Node.js 20+ (para o dashboard)
-- Rust 1.75+ (opcional, apenas para compilar fora do Docker)
-
-### Subir o backend
+## Atualização do Servidor
 
 ```bash
-docker compose up -d --build
-# A API estara em http://localhost:21114
-# O painel estara em http://localhost:80
+cd rustdesk-plus
+git pull origin main
+docker-compose up -d --build
 ```
 
-### Rodar o dashboard em modo dev
-
-```bash
-cd dashboard
-npm install
-echo "NEXT_PUBLIC_API_URL=http://localhost:21114" > .env.local
-npm run dev
-# Acesse http://localhost:3000
-```
-
-### Testar a API com curl
-
-```bash
-# Health check
-curl http://localhost:21114/health
-
-# Login (se ja tiver feito o setup)
-curl -s -X POST http://localhost:21114/admin/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@exemplo.com","password":"suasenha"}' | jq .
-
-# Simular heartbeat de um dispositivo
-curl -s -X POST http://localhost:21114/api/heartbeat \
-  -H "Content-Type: application/json" \
-  -d '{"id":"123456789","uuid":"test-uuid-pc-01"}' | jq .
-```
-
-### Build do instalador manualmente
-
-```bash
-# No diretorio raiz do projeto (requer Go 1.24 e acesso ao agente compilado)
-cd agent
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
-  -ldflags "-s -w -H=windowsgui -X main.apiURL=http://SEU_IP" \
-  -o ../installer/rustdesk-agent.exe .
-
-cd ../installer
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
-  -ldflags "-s -w -H=windowsgui -X main.serverIP=SEU_IP -X main.serverKey=SUA_CHAVE -X main.apiURL=http://SEU_IP" \
-  -o rustdesk-installer.exe .
-```
+O banco de dados é atualizado automaticamente pelas migrations SQLx. Volumes (`plus-data/postgres`, `data/`) são preservados.
 
 ---
 
-## Contribuindo
+## Segurança
 
-1. Faca um fork do repositorio
-2. Crie uma branch descritiva: `git checkout -b feat/nome-da-feature`
-3. Commit seguindo Conventional Commits: `git commit -m 'feat: adiciona suporte a X'`
-4. Push: `git push origin feat/nome-da-feature`
-5. Abra um Pull Request com descricao clara do que foi feito e por que
-
-Para mudancas grandes (nova funcionalidade, refatoracao de arquitetura), abra uma issue primeiro para alinharmos a abordagem.
+- **Senhas** armazenadas com Argon2id
+- **JWT HS256** com `tenant_id` embutido no token; expiração de 7 dias
+- **Isolamento de tenant** garantido em todas as queries SQL com `WHERE tenant_id = $N`
+- **Super admin** identificado por `role = 'super_admin'` no JWT com `tenant_id = NULL`
+- **Senha de acesso remoto** por tenant — um cliente não conhece a senha do outro
+- **`JWT_SECRET`** e **`POSTGRES_PASSWORD`** gerados com `openssl rand -hex 32`
 
 ---
 
-## Creditos
+## Créditos
 
 | | |
 |---|---|
@@ -615,10 +354,10 @@ Para mudancas grandes (nova funcionalidade, refatoracao de arquitetura), abra um
 
 ---
 
-## Licenca
+## Licença
 
 MIT (c) 2026 Contribuidores do RustDesk Plus — veja [LICENSE](LICENSE)
 
 ---
 
-> **Aviso legal:** Este projeto nao tem afiliacao com o projeto RustDesk oficial nem com a Purslane Ltd. O cliente RustDesk e o servidor (`hbbs`/`hbbr`) sao licenciados sob AGPL-3.0. O RustDesk Plus e um servico completamente independente que se comunica com eles via HTTP sem modificar nenhum codigo original — o que o mantem fora do escopo da AGPL. Os binarios `hbbs` e `hbbr` sao obtidos diretamente da imagem Docker oficial `rustdesk/rustdesk-server` sem alteracoes.
+> **Aviso legal:** Este projeto não tem afiliação com o projeto RustDesk oficial nem com a Purslane Ltd. O cliente RustDesk e o servidor (`hbbs`/`hbbr`) são licenciados sob AGPL-3.0. O RustDesk Plus é um serviço completamente independente que se comunica com eles via HTTP sem modificar nenhum código original. Os binários `hbbs` e `hbbr` são obtidos diretamente da imagem Docker oficial `rustdesk/rustdesk-server` sem alterações.
