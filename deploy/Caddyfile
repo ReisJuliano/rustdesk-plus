@@ -21,7 +21,7 @@
 
     # Rotas da API e WebSocket → plus-api
     @api {
-        path /admin/* /api/* /ws/* /setup/* /super/* /health
+        path /admin/* /api/* /ws/* /setup/* /super/* /health /t/*
     }
     handle @api {
         reverse_proxy plus-api:21114 {

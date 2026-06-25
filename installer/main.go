@@ -428,11 +428,12 @@ func runInstall(hwnd uintptr) {
 	fmt.Fprintf(&sb, "key = '%s'\n", serverKey)
 	fmt.Fprintf(&sb, "custom-rendezvous-server = '%s'\n", serverIP)
 	fmt.Fprintf(&sb, "relay-server = '%s'\n", serverIP)
-	// O tenant_id é embutido como query param do api-server.
-	// O plus-api extrai esse param nos endpoints /api/heartbeat e /api/sysinfo.
+	// O tenant_id é embutido no path do api-server: /t/<tenantID>
+	// O RustDesk cliente concatena /api/heartbeat → /t/<tenantID>/api/heartbeat
+	// A API extrai o tenant do parâmetro de path.
 	effectiveAPIURL := apiURL
 	if apiURL != "" && tenantID != "" {
-		effectiveAPIURL = apiURL + "?tid=" + tenantID
+		effectiveAPIURL = strings.TrimRight(apiURL, "/") + "/t/" + tenantID
 	}
 	if effectiveAPIURL != "" {
 		fmt.Fprintf(&sb, "api-server = '%s'\n", effectiveAPIURL)

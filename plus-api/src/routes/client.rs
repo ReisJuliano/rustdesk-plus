@@ -1,5 +1,5 @@
 use axum::{
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::HeaderMap,
     response::IntoResponse,
     routing::{get, post},
@@ -14,6 +14,7 @@ use crate::{error::AppError, state::AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        // Rotas legadas sem tenant (mantidas para compatibilidade)
         .route("/api/login-options", get(login_options))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
@@ -23,6 +24,17 @@ pub fn router() -> Router<AppState> {
         .route("/api/sysinfo_ver", post(sysinfo_ver))
         .route("/api/ab/get", post(ab_get))
         .route("/api/ab", post(ab_set))
+        // Rotas com tenant_id no path — usadas pelo instalador v2
+        // O RustDesk cliente faz POST /t/<tenant_id>/api/heartbeat
+        .route("/t/:tenant_id/api/login-options", get(login_options))
+        .route("/t/:tenant_id/api/login", post(login))
+        .route("/t/:tenant_id/api/logout", post(logout))
+        .route("/t/:tenant_id/api/currentUser", post(current_user))
+        .route("/t/:tenant_id/api/heartbeat", post(heartbeat_tenant_path))
+        .route("/t/:tenant_id/api/sysinfo", post(sysinfo_tenant_path))
+        .route("/t/:tenant_id/api/sysinfo_ver", post(sysinfo_ver))
+        .route("/t/:tenant_id/api/ab/get", post(ab_get))
+        .route("/t/:tenant_id/api/ab", post(ab_set))
 }
 
 fn extract_ip(addr: SocketAddr, headers: &HeaderMap) -> String {
@@ -82,11 +94,21 @@ async fn heartbeat(
     Query(q): Query<TidQuery>,
     Json(body): Json<HeartbeatBody>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(tenant_id) = body.tenant_id.or(q.tid) else {
+    heartbeat_inner(&state, addr, &headers, q.tid, body).await
+}
+
+async fn heartbeat_inner(
+    state: &AppState,
+    addr: SocketAddr,
+    headers: &HeaderMap,
+    query_tid: Option<Uuid>,
+    body: HeartbeatBody,
+) -> Result<Json<Value>, AppError> {
+    let Some(tenant_id) = body.tenant_id.or(query_tid) else {
         tracing::warn!("heartbeat sem tenant_id descartado: rustdesk_id={}", body.id);
         return Ok(Json(json!({})));
     };
-    let ip = extract_ip(addr, &headers);
+    let ip = extract_ip(addr, headers);
 
     // Remove placeholder criado pelo agente com o mesmo rustdesk_id mas UUID diferente
     sqlx::query(
@@ -167,11 +189,21 @@ async fn sysinfo(
     Query(q): Query<TidQuery>,
     Json(body): Json<SysinfoBody>,
 ) -> Result<impl IntoResponse, AppError> {
-    let Some(tenant_id) = body.tenant_id.or(q.tid) else {
+    sysinfo_inner(&state, addr, &headers, q.tid, body).await
+}
+
+async fn sysinfo_inner(
+    state: &AppState,
+    addr: SocketAddr,
+    headers: &HeaderMap,
+    query_tid: Option<Uuid>,
+    body: SysinfoBody,
+) -> Result<impl IntoResponse, AppError> {
+    let Some(tenant_id) = body.tenant_id.or(query_tid) else {
         tracing::warn!("sysinfo sem tenant_id descartado: rustdesk_id={}", body.id);
         return Ok("SYSINFO_IGNORED");
     };
-    let ip = extract_ip(addr, &headers);
+    let ip = extract_ip(addr, headers);
 
     sqlx::query(
         "DELETE FROM devices WHERE rustdesk_id = $1 AND uuid != $2 AND uuid LIKE 'host-%' AND tenant_id = $3",
@@ -207,6 +239,30 @@ async fn sysinfo(
     .await?;
 
     Ok("SYSINFO_UPDATED")
+}
+
+/// Tenant_id extraído do path: POST /t/:tenant_id/api/heartbeat
+async fn heartbeat_tenant_path(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(tenant_id): Path<Uuid>,
+    Json(body): Json<HeartbeatBody>,
+) -> Result<Json<Value>, AppError> {
+    let body = HeartbeatBody { tenant_id: Some(body.tenant_id.unwrap_or(tenant_id)), ..body };
+    heartbeat_inner(&state, addr, &headers, None, body).await
+}
+
+/// Tenant_id extraído do path: POST /t/:tenant_id/api/sysinfo
+async fn sysinfo_tenant_path(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(tenant_id): Path<Uuid>,
+    Json(body): Json<SysinfoBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let body = SysinfoBody { tenant_id: Some(body.tenant_id.unwrap_or(tenant_id)), ..body };
+    sysinfo_inner(&state, addr, &headers, None, body).await
 }
 
 async fn sysinfo_ver() -> impl IntoResponse {

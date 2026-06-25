@@ -7,7 +7,7 @@ use std::{
 use uuid::Uuid;
 
 // Bump ao mudar installer/main.go ou agent/main.go — força rebuild do cache.
-const INSTALLER_BUILD: &str = "5";
+const INSTALLER_BUILD: &str = "6";
 
 fn run(command: &mut Command, description: &str) -> anyhow::Result<()> {
     let output = command.output()?;
