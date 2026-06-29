@@ -16,6 +16,7 @@ type HistoryEntry = {
   powershell: boolean;
   result: ExecJobResult | null;
   running: boolean;
+  startedAt: number; // Date.now()
 };
 
 export default function TerminalPage() {
@@ -36,14 +37,24 @@ export default function TerminalPage() {
   const [cmdHistoryIdx, setCmdHistoryIdx] = useState(-1);
   const [error, setError] = useState<string | null>(null);
   const [showConfig, setShowConfig] = useState(true);
+  const [tick, setTick] = useState(0);
 
   const termRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const pollsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
   const anyRunning = history.some((e) => e.running);
+  // tick increments every second while running, forcing re-render so elapsed times update
+  const now = tick >= 0 && anyRunning ? Date.now() : 0;
   const noTenantSelected = superAdmin && !selectedTenantId;
   const prompt = powershell ? "PS >" : ">";
+
+  // Tick every second while any command is running (for elapsed timer)
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [anyRunning]);
 
   // Auto-scroll to bottom whenever history updates
   useEffect(() => {
@@ -114,7 +125,7 @@ export default function TerminalPage() {
     const placeholderId = `pending-${Date.now()}`;
     setHistory((prev) => [
       ...prev,
-      { jobId: placeholderId, cmd: trimmed, powershell, result: null, running: true },
+      { jobId: placeholderId, cmd: trimmed, powershell, result: null, running: true, startedAt: Date.now() },
     ]);
 
     try {
@@ -467,8 +478,13 @@ export default function TerminalPage() {
                           </pre>
                         )}
                         {!r.done && (
-                          <span className="font-mono text-slate-500 text-sm animate-pulse">
-                            ▊
+                          <span className="font-mono text-slate-500 text-sm">
+                            <span className="animate-pulse">▊</span>
+                            {!r.output && (
+                              <span className="text-slate-600 text-xs ml-2 select-none">
+                                {Math.floor((now - entry.startedAt) / 1000)}s — aguardando output...
+                              </span>
+                            )}
                           </span>
                         )}
                         {r.done && r.exit_code !== null && r.exit_code !== 0 && (
@@ -476,11 +492,19 @@ export default function TerminalPage() {
                             exit code {r.exit_code}
                           </p>
                         )}
+                        {r.done && r.exit_code === 0 && (
+                          <p className="font-mono text-xs text-slate-600 select-none">
+                            concluído em {Math.floor(((r.finished_at ? new Date(r.finished_at).getTime() : Date.now()) - entry.startedAt) / 1000)}s
+                          </p>
+                        )}
                       </div>
                     ))
                   ) : (
-                    <div className="font-mono text-sm text-slate-500 mt-0.5 animate-pulse">
-                      ▊ aguardando agente...
+                    <div className="font-mono text-sm text-slate-500 mt-0.5">
+                      <span className="animate-pulse">▊</span>
+                      <span className="text-slate-600 text-xs ml-2 select-none">
+                        {Math.floor((now - entry.startedAt) / 1000)}s — conectando ao agente...
+                      </span>
                     </div>
                   )}
                 </div>
