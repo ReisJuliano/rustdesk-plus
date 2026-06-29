@@ -6,8 +6,9 @@ use std::{
 };
 use uuid::Uuid;
 
-// Bump ao mudar installer/main.go ou agent/main.go — força rebuild do cache.
-const INSTALLER_BUILD: &str = "7";
+// Bump este número ao mudar agent/main.go ou installer/main.go.
+// Todos os agentes já instalados se auto-atualizarão ao detectar a divergência.
+pub const INSTALLER_BUILD: &str = "8";
 
 fn run(command: &mut Command, description: &str) -> anyhow::Result<()> {
     let output = command.output()?;
@@ -25,7 +26,27 @@ fn copy_file(source: impl AsRef<Path>, target: impl AsRef<Path>) -> anyhow::Resu
     Ok(())
 }
 
-pub fn build(config: &ServerConfig, tenant_id: Uuid, rustdesk_password: &str) -> anyhow::Result<PathBuf> {
+fn generated_dir() -> PathBuf {
+    let base = PathBuf::from(
+        std::env::var("INSTALLER_PATH")
+            .unwrap_or_else(|_| "/app/generated/rustdesk-installer.exe".to_string()),
+    );
+    base.parent()
+        .unwrap_or_else(|| Path::new("/app/generated"))
+        .to_path_buf()
+}
+
+/// Caminho do binário do agente para o tenant (salvo ao lado do installer).
+pub fn agent_binary_path(tenant_id: Uuid) -> PathBuf {
+    generated_dir().join(format!("agent-{tenant_id}.exe"))
+}
+
+pub fn build(
+    config: &ServerConfig,
+    tenant_id: Uuid,
+    rustdesk_password: &str,
+    install_code: &str,
+) -> anyhow::Result<PathBuf> {
     if config.server_ip.trim().is_empty()
         || config.server_key.trim().is_empty()
         || config.api_url.trim().is_empty()
@@ -33,15 +54,9 @@ pub fn build(config: &ServerConfig, tenant_id: Uuid, rustdesk_password: &str) ->
         anyhow::bail!("configure o servidor antes de baixar o instalador");
     }
 
-    let base_path = PathBuf::from(
-        std::env::var("INSTALLER_PATH")
-            .unwrap_or_else(|_| "/app/generated/rustdesk-installer.exe".to_string()),
-    );
-    let generated_dir = base_path
-        .parent()
-        .unwrap_or_else(|| Path::new("/app/generated"));
-
+    let generated_dir = generated_dir();
     let output_path = generated_dir.join(format!("installer-{tenant_id}.exe"));
+    let agent_path = generated_dir.join(format!("agent-{tenant_id}.exe"));
     let metadata_path = generated_dir.join(format!("installer-config-{tenant_id}.json"));
 
     let expected_metadata = {
@@ -49,10 +64,12 @@ pub fn build(config: &ServerConfig, tenant_id: Uuid, rustdesk_password: &str) ->
         m["rustdesk_password"] = serde_json::Value::String(rustdesk_password.to_string());
         m["_build"] = serde_json::Value::String(INSTALLER_BUILD.to_string());
         m["_tenant"] = serde_json::Value::String(tenant_id.to_string());
+        m["_install_code"] = serde_json::Value::String(install_code.to_string());
         serde_json::to_vec(&m)?
     };
 
     if output_path.exists()
+        && agent_path.exists()
         && fs::read(&metadata_path)
             .map(|value| value == expected_metadata)
             .unwrap_or(false)
@@ -87,8 +104,8 @@ pub fn build(config: &ServerConfig, tenant_id: Uuid, rustdesk_password: &str) ->
 
     let agent_exe = installer_dir.join("rustdesk-agent.exe");
     let agent_ldflags = format!(
-        "-s -w -H=windowsgui -X main.apiURL={} -X main.tenantID={}",
-        config.api_url, tenant_id
+        "-s -w -H=windowsgui -X main.apiURL={} -X main.tenantID={} -X main.installCode={} -X main.agentVersion={}",
+        config.api_url, tenant_id, install_code, INSTALLER_BUILD
     );
     run(
         Command::new("go")
@@ -101,6 +118,10 @@ pub fn build(config: &ServerConfig, tenant_id: Uuid, rustdesk_password: &str) ->
             .arg("."),
         "build do agente",
     )?;
+
+    // Salva o binário do agente separado (usado pelo auto-update)
+    fs::create_dir_all(&generated_dir)?;
+    fs::copy(&agent_exe, &agent_path)?;
 
     run(
         Command::new("go")

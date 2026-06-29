@@ -54,6 +54,9 @@ pub fn router() -> Router<AppState> {
         // Endpoints públicos — por código de instalação (sem auth)
         .route("/i/:code", get(install_script))
         .route("/install/:code", get(install_binary))
+        // Auto-update do agente (sem auth — usado pelo agente Go)
+        .route("/agent-version", get(agent_version_check))
+        .route("/agent/:code", get(agent_binary_download))
         // Super admin — gestão de tenants
         .route("/super/tenants", get(list_tenants).post(create_tenant))
         .route("/super/tenants/:id", delete(delete_tenant))
@@ -178,8 +181,9 @@ async fn download_installer(
     let _build_guard = state.installer_build.lock().await;
     let config = config::load(&state.db).await?;
     let password = config::load_tenant_password(&state.db, tenant_id).await?;
+    let install_code = config::ensure_tenant_install_code(&state.db, tenant_id).await?;
     let path = tokio::task::spawn_blocking(move || {
-        crate::installer::build(&config, tenant_id, &password)
+        crate::installer::build(&config, tenant_id, &password, &install_code)
     })
     .await
     .map_err(anyhow::Error::new)??;
@@ -892,8 +896,9 @@ async fn install_binary(
     let _build_guard = state.installer_build.lock().await;
     let config = config::load(&state.db).await?;
     let password = config::load_tenant_password(&state.db, tenant_id).await?;
+    let install_code = code.clone();
     let path = tokio::task::spawn_blocking(move || {
-        crate::installer::build(&config, tenant_id, &password)
+        crate::installer::build(&config, tenant_id, &password, &install_code)
     })
     .await
     .map_err(anyhow::Error::new)??;
@@ -902,6 +907,47 @@ async fn install_binary(
     Response::builder()
         .header(CONTENT_TYPE, "application/vnd.microsoft.portable-executable")
         .header(CONTENT_DISPOSITION, "attachment; filename=\"rustdesk-installer.exe\"")
+        .header(CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|e| anyhow::Error::new(e).into())
+}
+
+/// GET /agent-version — versão atual do agente (sem auth, usado pelo agente Go para auto-update)
+async fn agent_version_check() -> impl axum::response::IntoResponse {
+    axum::Json(serde_json::json!({
+        "version": crate::installer::INSTALLER_BUILD
+    }))
+}
+
+/// GET /agent/:code — serve o binário do agente (sem auth, protegido pelo install_code)
+async fn agent_binary_download(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<Response<Body>, AppError> {
+    let tenant_id = tenant_by_install_code(&state.db, &code)
+        .await
+        .ok_or(AppError::NotFound)?;
+
+    let agent_path = crate::installer::agent_binary_path(tenant_id);
+
+    // Se o binário do agente ainda não existe, dispara o build do installer (que o gera)
+    if !agent_path.exists() {
+        let _build_guard = state.installer_build.lock().await;
+        let config = config::load(&state.db).await?;
+        let password = config::load_tenant_password(&state.db, tenant_id).await?;
+        let install_code = code.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::installer::build(&config, tenant_id, &password, &install_code)
+        })
+        .await
+        .map_err(anyhow::Error::new)??;
+    }
+
+    let bytes = tokio::fs::read(&agent_path).await.map_err(anyhow::Error::new)?;
+
+    Response::builder()
+        .header(CONTENT_TYPE, "application/vnd.microsoft.portable-executable")
+        .header(CONTENT_DISPOSITION, "attachment; filename=\"rustdesk-agent.exe\"")
         .header(CONTENT_LENGTH, bytes.len().to_string())
         .body(Body::from(bytes))
         .map_err(|e| anyhow::Error::new(e).into())

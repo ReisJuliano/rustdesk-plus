@@ -12,9 +12,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,9 +27,11 @@ import (
 
 // Injetados em build time
 var (
-	apiURL     = "http://localhost:21114"
-	deviceUUID = "" // se vazio, derivado do hostname
-	tenantID   = "" // UUID do tenant — obrigatório
+	apiURL       = "http://localhost:21114"
+	deviceUUID   = "" // se vazio, derivado do hostname
+	tenantID     = "" // UUID do tenant — obrigatório
+	installCode  = "" // código de instalação do tenant — usado no auto-update
+	agentVersion = "dev" // versão (INSTALLER_BUILD) injetada pelo servidor ao compilar
 )
 
 // ── Config do dispositivo ────────────────────────────────────────────────────
@@ -558,8 +562,98 @@ func connect(uuid string) {
 	}
 }
 
+// ── Auto-update ──────────────────────────────────────────────────────────────
+
+func startAutoUpdater() {
+	go func() {
+		time.Sleep(60 * time.Second) // deixa o agente estabilizar antes do primeiro check
+		for {
+			tryAutoUpdate()
+			time.Sleep(2 * time.Hour)
+		}
+	}()
+}
+
+func tryAutoUpdate() {
+	if installCode == "" || apiURL == "" {
+		return
+	}
+
+	resp, err := http.Get(apiURL + "/agent-version")
+	if err != nil || resp.StatusCode != 200 {
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+
+	if result.Version == agentVersion {
+		return // já está na versão mais recente
+	}
+
+	fmt.Fprintf(os.Stdout, "[agent] nova versão detectada: servidor=%s local=%s — iniciando auto-update\n",
+		result.Version, agentVersion)
+
+	// Baixa o novo binário do agente
+	dlResp, err := http.Get(apiURL + "/agent/" + installCode)
+	if err != nil || dlResp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "[agent] falha ao baixar novo agente: %v status=%d\n", err, dlResp.StatusCode)
+		return
+	}
+	defer dlResp.Body.Close()
+
+	newBin, err := io.ReadAll(dlResp.Body)
+	if err != nil || len(newBin) < 1024 {
+		fmt.Fprintf(os.Stderr, "[agent] binário inválido recebido (%d bytes)\n", len(newBin))
+		return
+	}
+
+	selfExe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	selfExe, _ = filepath.Abs(selfExe)
+
+	tmpExe := filepath.Join(os.TempDir(), "rustdesk-agent-new.exe")
+	if err := os.WriteFile(tmpExe, newBin, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "[agent] erro ao salvar novo binário: %v\n", err)
+		return
+	}
+
+	// Batch que substitui o executável e reinicia a task após o agente encerrar
+	batPath := filepath.Join(os.TempDir(), "rdplus-update.bat")
+	bat := fmt.Sprintf(`@echo off
+timeout /t 4 /nobreak > NUL
+taskkill /F /IM rustdesk-agent.exe 2>NUL
+timeout /t 2 /nobreak > NUL
+copy /y "%s" "%s"
+schtasks /Run /TN "RustDeskPlusAgent" 2>NUL
+del "%%~f0"
+`, tmpExe, selfExe)
+	if err := os.WriteFile(batPath, []byte(bat), 0644); err != nil {
+		return
+	}
+
+	// Lança o batch desacoplado do processo atual
+	cmd := exec.Command("cmd.exe", "/c", batPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x00000008} // DETACHED_PROCESS
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "[agent] erro ao lançar updater: %v\n", err)
+		return
+	}
+
+	fmt.Fprintln(os.Stdout, "[agent] auto-update em andamento — encerrando para que o updater assuma")
+	os.Exit(0)
+}
+
 func main() {
 	uuid := getDeviceUUID()
-	fmt.Fprintf(os.Stdout, "[agent] iniciando — UUID: %s\n", uuid)
+	fmt.Fprintf(os.Stdout, "[agent] iniciando — UUID: %s versão: %s\n", uuid, agentVersion)
+	startAutoUpdater()
 	connect(uuid)
 }
