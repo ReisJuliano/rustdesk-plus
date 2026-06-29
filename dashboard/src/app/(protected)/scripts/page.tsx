@@ -877,8 +877,14 @@ function ExecuteTab() {
                   )}
                 </button>
 
-                {expandedDevice === r.id && r.steps.length > 0 && (
+                {expandedDevice === r.id && (
                   <div className="px-5 pb-3 space-y-2">
+                    {r.error && r.steps.length === 0 && (
+                      <div className="rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 flex items-center gap-2">
+                        <svg className="h-4 w-4 text-rose-400 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-8-5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0v-4.5A.75.75 0 0 1 10 5Zm0 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clipRule="evenodd" /></svg>
+                        <span className="text-sm text-rose-700">{r.error}</span>
+                      </div>
+                    )}
                     {r.steps.map((step) => (
                       <div key={step.node_id} className="rounded-xl border border-slate-100 overflow-hidden">
                         <div className="flex items-center gap-2 px-3 py-2 bg-slate-50">
@@ -978,8 +984,14 @@ function HistoryTab() {
                   )}
                 </button>
 
-                {expandedDevice === r.id && r.steps.length > 0 && (
+                {expandedDevice === r.id && (
                   <div className="px-5 pb-3 space-y-2">
+                    {r.error && r.steps.length === 0 && (
+                      <div className="rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 flex items-center gap-2">
+                        <svg className="h-4 w-4 text-rose-400 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-8-5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0v-4.5A.75.75 0 0 1 10 5Zm0 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clipRule="evenodd" /></svg>
+                        <span className="text-sm text-rose-700">{r.error}</span>
+                      </div>
+                    )}
                     {r.steps.map((step) => (
                       <div key={step.node_id} className="rounded-xl border border-slate-100 overflow-hidden">
                         <div className="flex items-center gap-2 px-3 py-2 bg-slate-50">
