@@ -8,47 +8,76 @@ import {
 } from "@/lib/api";
 import { getStoredUser } from "@/lib/auth";
 
-type TargetMode = "all" | "tag" | "devices";
+type TargetMode = "all" | "tag" | "device";
+
+type HistoryEntry = {
+  jobId: string;
+  cmd: string;
+  powershell: boolean;
+  result: ExecJobResult | null;
+  running: boolean;
+};
 
 export default function TerminalPage() {
   const user = getStoredUser();
   const superAdmin = user ? isSuperAdmin(user) : false;
 
-  const [tenants, setTenants]               = useState<Tenant[]>([]);
+  const [tenants, setTenants] = useState<Tenant[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string>(getActiveTenantId() ?? "");
-  const [tags, setTags]                     = useState<Tag[]>([]);
-  const [devices, setDevices]               = useState<Device[]>([]);
-  const [targetMode, setTargetMode]         = useState<TargetMode>("all");
-  const [selectedTag, setSelectedTag]       = useState("");
-  const [selectedDevices, setSelectedDevices] = useState<Set<string>>(new Set());
-  const [cmd, setCmd]                       = useState("");
-  const [powershell, setPowershell]         = useState(false);
-  const [running, setRunning]               = useState(false);
-  const [result, setResult]                 = useState<ExecJobResult | null>(null);
-  const [error, setError]                   = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [targetMode, setTargetMode] = useState<TargetMode>("all");
+  const [selectedTag, setSelectedTag] = useState("");
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [powershell, setPowershell] = useState(true);
+  const [cmd, setCmd] = useState("");
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+  const [cmdHistoryIdx, setCmdHistoryIdx] = useState(-1);
+  const [error, setError] = useState<string | null>(null);
+  const [showConfig, setShowConfig] = useState(true);
 
-  // Carrega lista de tenants para o super admin
+  const termRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const pollsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+
+  const anyRunning = history.some((e) => e.running);
+  const noTenantSelected = superAdmin && !selectedTenantId;
+  const prompt = powershell ? "PS >" : ">";
+
+  // Auto-scroll to bottom whenever history updates
+  useEffect(() => {
+    if (termRef.current) {
+      termRef.current.scrollTop = termRef.current.scrollHeight;
+    }
+  }, [history]);
+
   useEffect(() => {
     if (superAdmin) listTenants().then(setTenants);
   }, [superAdmin]);
 
-  // Recarrega devices/tags quando o tenant muda
   useEffect(() => {
     if (superAdmin && !selectedTenantId) return;
-    setSelectedDevices(new Set());
-    setSelectedTag("");
     Promise.all([listTags(), listDevices({ online: true })]).then(([t, d]) => {
       setTags(t);
       setDevices(d);
     });
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      pollsRef.current.forEach(clearInterval);
+      pollsRef.current.clear();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTenantId]);
+
+  useEffect(() => {
+    return () => {
+      pollsRef.current.forEach(clearInterval);
+    };
+  }, []);
 
   function onTenantChange(id: string) {
     setSelectedTenantId(id);
-    setResult(null);
+    setHistory([]);
     setError(null);
     const tenant = tenants.find((t) => t.id === id);
     if (tenant) setActiveTenant(id, tenant.name);
@@ -56,217 +85,456 @@ export default function TerminalPage() {
   }
 
   async function onRun() {
-    if (!cmd.trim()) return;
-    if (superAdmin && !selectedTenantId) {
+    const trimmed = cmd.trim();
+    if (!trimmed || anyRunning) return;
+    if (noTenantSelected) {
       setError("Selecione um cliente antes de executar.");
       return;
     }
-    setRunning(true);
+
+    if (trimmed.toLowerCase() === "clear" || trimmed.toLowerCase() === "cls") {
+      setHistory([]);
+      setCmd("");
+      setCmdHistoryIdx(-1);
+      return;
+    }
+
+    setCmd("");
     setError(null);
-    setResult(null);
+    setCmdHistoryIdx(-1);
+    setCmdHistory((prev) => [trimmed, ...prev.slice(0, 49)]);
+
+    const body: Parameters<typeof execCommand>[0] = { cmd: trimmed, powershell };
+    if (targetMode === "tag" && selectedTag) body.tag_id = selectedTag;
+    if (targetMode === "device" && selectedDeviceId) {
+      const dev = devices.find((d) => d.id === selectedDeviceId);
+      if (dev) body.targets = [dev.uuid];
+    }
+
+    const placeholderId = `pending-${Date.now()}`;
+    setHistory((prev) => [
+      ...prev,
+      { jobId: placeholderId, cmd: trimmed, powershell, result: null, running: true },
+    ]);
 
     try {
-      const body: Parameters<typeof execCommand>[0] = { cmd: cmd.trim(), powershell };
-      if (targetMode === "tag" && selectedTag) body.tag_id = selectedTag;
-      if (targetMode === "devices" && selectedDevices.size > 0) {
-        const uuids = devices.filter((d) => selectedDevices.has(d.id)).map((d) => d.uuid);
-        body.targets = uuids;
-      }
-
       const resp = await execCommand(body);
+
       if (resp.sent === 0) {
-        throw new Error(
+        const errMsg =
           resp.targets === 0
-            ? "Nenhum dispositivo online foi encontrado."
-            : "Nenhum agente está conectado. Reinstale o agente no PC."
+            ? "Nenhum dispositivo online encontrado."
+            : "Agente não conectado. Reinstale o agente no PC.";
+        setHistory((prev) =>
+          prev.map((e) =>
+            e.jobId === placeholderId
+              ? {
+                  ...e,
+                  jobId: resp.job_id ?? placeholderId,
+                  running: false,
+                  result: {
+                    job_id: resp.job_id ?? "",
+                    cmd: trimmed,
+                    powershell,
+                    results: [
+                      {
+                        device_id: "err",
+                        hostname: null,
+                        alias: null,
+                        rustdesk_id: "—",
+                        ip_address: null,
+                        output: errMsg,
+                        exit_code: -1,
+                        done: true,
+                        started_at: new Date().toISOString(),
+                        finished_at: new Date().toISOString(),
+                      },
+                    ],
+                  },
+                }
+              : e
+          )
         );
+        setTimeout(() => inputRef.current?.focus(), 50);
+        return;
       }
 
-      pollRef.current = setInterval(async () => {
+      const jobId: string = resp.job_id;
+      setHistory((prev) =>
+        prev.map((e) => (e.jobId === placeholderId ? { ...e, jobId } : e))
+      );
+
+      const interval = setInterval(async () => {
         try {
-          const r = await getExecResults(resp.job_id);
-          setResult(r);
-          if (r.results.length > 0 && r.results.every((x) => x.done)) {
-            clearInterval(pollRef.current!);
-            setRunning(false);
+          const r = await getExecResults(jobId);
+          const allDone = r.results.length > 0 && r.results.every((x) => x.done);
+          setHistory((prev) =>
+            prev.map((e) =>
+              e.jobId === jobId ? { ...e, result: r, running: !allDone } : e
+            )
+          );
+          if (allDone) {
+            clearInterval(interval);
+            pollsRef.current.delete(jobId);
+            setTimeout(() => inputRef.current?.focus(), 50);
           }
-        } catch { /* ignore */ }
-      }, 800);
+        } catch {
+          // ignore transient failures
+        }
+      }, 400);
+
+      pollsRef.current.set(jobId, interval);
 
       setTimeout(() => {
-        if (pollRef.current) { clearInterval(pollRef.current); setRunning(false); }
-      }, 60000);
+        const iv = pollsRef.current.get(jobId);
+        if (iv) {
+          clearInterval(iv);
+          pollsRef.current.delete(jobId);
+          setHistory((prev) =>
+            prev.map((e) => (e.jobId === jobId ? { ...e, running: false } : e))
+          );
+          setTimeout(() => inputRef.current?.focus(), 50);
+        }
+      }, 120_000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao executar");
-      setRunning(false);
+      const msg = err instanceof Error ? err.message : "Erro ao executar";
+      setHistory((prev) =>
+        prev.map((e) =>
+          e.jobId === placeholderId
+            ? {
+                ...e,
+                running: false,
+                result: {
+                  job_id: "",
+                  cmd: trimmed,
+                  powershell,
+                  results: [
+                    {
+                      device_id: "err",
+                      hostname: null,
+                      alias: null,
+                      rustdesk_id: "—",
+                      ip_address: null,
+                      output: msg,
+                      exit_code: -1,
+                      done: true,
+                      started_at: new Date().toISOString(),
+                      finished_at: null,
+                    },
+                  ],
+                },
+              }
+            : e
+        )
+      );
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   }
 
-  function toggleDevice(id: string) {
-    setSelectedDevices((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      onRun();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = Math.min(cmdHistoryIdx + 1, cmdHistory.length - 1);
+      setCmdHistoryIdx(next);
+      if (cmdHistory[next] !== undefined) setCmd(cmdHistory[next]);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = Math.max(cmdHistoryIdx - 1, -1);
+      setCmdHistoryIdx(next);
+      setCmd(next === -1 ? "" : cmdHistory[next]);
+    }
   }
 
   const onlineDevices = devices.filter((d) => d.online);
-  const noTenantSelected = superAdmin && !selectedTenantId;
 
   return (
-    <div className="p-6 space-y-5">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">Terminal Remoto</h1>
-        <p className="text-slate-400 text-sm mt-1">
-          Execute comandos em múltiplos dispositivos simultaneamente. Requer o agente instalado.
-        </p>
-      </div>
-
-      {/* Seletor de cliente — só para super admin */}
-      {superAdmin && (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-          <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest block mb-2">
-            Cliente
-          </label>
-          <select
-            value={selectedTenantId}
-            onChange={(e) => onTenantChange(e.target.value)}
-            className="w-full sm:w-auto rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="">— Selecione um cliente —</option>
-            {tenants.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name} ({t.online_count ?? 0} online)
-              </option>
-            ))}
-          </select>
-          {noTenantSelected && (
-            <p className="text-xs text-slate-400 mt-2">Selecione um cliente para ver os dispositivos e executar comandos.</p>
-          )}
-        </div>
-      )}
-
-      <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4 ${noTenantSelected ? "opacity-40 pointer-events-none" : ""}`}>
-        {/* Destino */}
-        <div className="space-y-2">
-          <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Destino</label>
-          <div className="flex gap-2 flex-wrap">
-            {(["all", "tag", "devices"] as TargetMode[]).map((m) => {
-              const labels: Record<TargetMode, string> = { all: "Todos online", tag: "Por tag", devices: "Selecionar PCs" };
-              return (
-                <button key={m} onClick={() => setTargetMode(m)}
-                  className={`px-4 py-1.5 rounded-2xl text-xs font-semibold border transition-all ${
-                    targetMode === m ? "text-white border-transparent bg-blue-600" : "border-slate-200 text-slate-500 hover:bg-slate-50"
-                  }`}>
-                  {labels[m]}
-                </button>
-              );
-            })}
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* ── Config header ── */}
+      <div className="flex-shrink-0 px-6 pt-5 pb-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">Terminal Remoto</h1>
+            <p className="text-slate-400 text-sm mt-0.5">
+              Execute comandos com saída em tempo real. Use ↑↓ para histórico. Digite{" "}
+              <code className="font-mono text-xs bg-slate-100 px-1 rounded">clear</code> para limpar.
+            </p>
           </div>
-
-          {targetMode === "tag" && (
-            <select value={selectedTag} onChange={(e) => setSelectedTag(e.target.value)}
-              className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">Selecione uma tag</option>
-              {tags.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-          )}
-
-          {targetMode === "devices" && (
-            <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto p-2 border border-slate-200 rounded-2xl bg-white">
-              {onlineDevices.length === 0 && <p className="text-xs text-slate-400">Nenhum dispositivo online com agente</p>}
-              {onlineDevices.map((d) => (
-                <button key={d.id} onClick={() => toggleDevice(d.id)}
-                  className={`px-3 py-1 rounded-2xl text-xs font-semibold border transition-all ${
-                    selectedDevices.has(d.id) ? "text-white border-transparent bg-blue-600" : "border-slate-200 text-slate-500 hover:bg-slate-50"
-                  }`}>
-                  {d.alias || d.hostname || d.rustdesk_id}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Shell */}
-        <div className="flex items-center gap-4">
-          <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Shell</label>
-          <div className="flex gap-3">
-            {[{ val: false, label: "CMD" }, { val: true, label: "PowerShell" }].map(({ val, label }) => (
-              <label key={label} className="flex items-center gap-1.5 cursor-pointer">
-                <input type="radio" checked={powershell === val} onChange={() => setPowershell(val)} className="accent-blue-600" />
-                <span className="text-sm text-slate-700 font-medium">{label}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-
-        {/* Comando */}
-        <div className="space-y-1.5">
-          <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Comando</label>
           <div className="flex gap-2">
-            <div className="flex-1 relative">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-sm font-mono">
-                {powershell ? "PS>" : ">"}
-              </span>
-              <input
-                value={cmd}
-                onChange={(e) => setCmd(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onRun(); } }}
-                placeholder={powershell ? "Get-Process | Sort CPU -Desc | Select -First 10" : "ipconfig /all"}
-                className="w-full rounded-2xl border border-slate-200 bg-white pl-10 pr-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <button onClick={onRun} disabled={running || !cmd.trim()}
-              className="rounded-2xl px-5 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center gap-2">
-              {running
-                ? <><span className="h-3.5 w-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Executando...</>
-                : <>▶ Executar</>}
+            <button
+              onClick={() => setHistory([])}
+              className="text-xs font-semibold text-slate-500 border border-slate-200 rounded-xl px-3 py-1.5 hover:bg-slate-50 transition-colors"
+            >
+              Limpar
+            </button>
+            <button
+              onClick={() => setShowConfig((v) => !v)}
+              className="text-xs font-semibold text-slate-500 border border-slate-200 rounded-xl px-3 py-1.5 hover:bg-slate-50 transition-colors"
+            >
+              {showConfig ? "▲ Ocultar" : "▼ Configurar"}
             </button>
           </div>
         </div>
-      </div>
 
-      {error && (
-        <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 text-sm text-rose-500">{error}</div>
-      )}
+        {showConfig && (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-3">
+            {superAdmin && (
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-widest w-16">
+                  Cliente
+                </span>
+                <select
+                  value={selectedTenantId}
+                  onChange={(e) => onTenantChange(e.target.value)}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">— Selecione —</option>
+                  {tenants.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name} ({t.online_count ?? 0} online)
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
-      {/* Resultados */}
-      {result && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 text-sm text-slate-400">
-            <span className="font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full text-xs font-semibold">{result.cmd}</span>
-            <span>·</span>
-            <span>{result.results.length} dispositivo{result.results.length !== 1 ? "s" : ""}</span>
-            {running && <span className="h-2 w-2 rounded-full bg-blue-600 animate-pulse ml-1" />}
-          </div>
-          {result.results.map((r) => (
-            <div key={r.device_id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className={`flex items-center gap-3 px-4 py-2.5 border-b border-slate-100 ${r.done ? "bg-slate-50" : "bg-blue-50"}`}>
-                <span className={`h-2 w-2 rounded-full flex-shrink-0 ${r.done ? "bg-slate-300" : "bg-blue-600 animate-pulse"}`} />
-                <span className="font-semibold text-sm text-slate-900">{r.alias || r.hostname || r.rustdesk_id}</span>
-                {r.ip_address && <span className="text-xs text-slate-400 font-mono">{r.ip_address}</span>}
-                <div className="ml-auto flex items-center gap-2">
-                  {r.done && r.exit_code !== null && (
-                    <span className={`text-xs font-mono px-2 py-0.5 rounded-full font-semibold ${r.exit_code === 0 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-600"}`}>
-                      exit {r.exit_code}
-                    </span>
-                  )}
-                  {!r.done && <span className="text-xs text-slate-500 font-medium">executando...</span>}
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-widest w-16">
+                  Destino
+                </span>
+                <div className="flex gap-1">
+                  {(
+                    [
+                      { val: "all", label: "Todos online" },
+                      { val: "tag", label: "Por tag" },
+                      { val: "device", label: "Um PC" },
+                    ] as { val: TargetMode; label: string }[]
+                  ).map(({ val, label }) => (
+                    <button
+                      key={val}
+                      onClick={() => setTargetMode(val)}
+                      className={`px-3 py-1 rounded-xl text-xs font-semibold border transition-all ${
+                        targetMode === val
+                          ? "text-white border-transparent bg-blue-600"
+                          : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {targetMode === "tag" && (
+                  <select
+                    value={selectedTag}
+                    onChange={(e) => setSelectedTag(e.target.value)}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Selecione tag</option>
+                    {tags.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {targetMode === "device" && (
+                  <select
+                    value={selectedDeviceId}
+                    onChange={(e) => setSelectedDeviceId(e.target.value)}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Selecione PC</option>
+                    {onlineDevices.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.alias || d.hostname || d.rustdesk_id}
+                        {d.ip_address ? ` — ${d.ip_address}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-widest w-12">
+                  Shell
+                </span>
+                <div className="flex gap-1">
+                  {[
+                    { val: false, label: "CMD" },
+                    { val: true, label: "PowerShell" },
+                  ].map(({ val, label }) => (
+                    <button
+                      key={label}
+                      onClick={() => setPowershell(val)}
+                      className={`px-3 py-1 rounded-xl text-xs font-semibold border transition-all ${
+                        powershell === val
+                          ? "text-white border-transparent bg-blue-600"
+                          : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
               </div>
-              <pre className="bg-[#0f172a] text-green-400 text-xs font-mono p-4 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap leading-relaxed">
-                {r.output || (r.done ? "(sem output)" : "aguardando...")}
-              </pre>
             </div>
-          ))}
-          {result.results.length === 0 && (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-8 text-center text-slate-400 text-sm">
-              Aguardando resposta dos agentes...
-              <p className="text-xs mt-1 text-slate-400">O agente precisa estar instalado e conectado em cada PC.</p>
-            </div>
-          )}
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-xl bg-rose-50 border border-rose-100 px-4 py-2 text-sm text-rose-500">
+            {error}
+          </div>
+        )}
+      </div>
+
+      {/* ── Terminal window — fills remaining height ── */}
+      <div
+        className={`flex-1 min-h-0 px-6 pb-6 flex flex-col ${
+          noTenantSelected ? "opacity-40 pointer-events-none" : ""
+        }`}
+      >
+        <div className="flex-1 min-h-0 flex flex-col bg-[#0d1117] rounded-2xl border border-slate-700 overflow-hidden shadow-xl">
+          {/* Scrollable history */}
+          <div
+            ref={termRef}
+            className="flex-1 min-h-0 overflow-y-auto p-5 cursor-text"
+            onClick={() => inputRef.current?.focus()}
+          >
+            {/* Empty state */}
+            {history.length === 0 && (
+              <div className="font-mono text-sm select-none space-y-0.5">
+                <p className="text-slate-400">
+                  {powershell
+                    ? "Windows PowerShell"
+                    : "Prompt de Comando (CMD)"}
+                </p>
+                <p className="text-slate-600 text-xs">
+                  {targetMode === "all"
+                    ? "Destino: todos os dispositivos online"
+                    : targetMode === "tag"
+                    ? `Destino: tag "${tags.find((t) => t.id === selectedTag)?.name ?? "—"}"`
+                    : `Destino: ${
+                        onlineDevices.find((d) => d.id === selectedDeviceId)?.alias ||
+                        onlineDevices.find((d) => d.id === selectedDeviceId)?.hostname ||
+                        "—"
+                      }`}
+                </p>
+                <p className="text-slate-600 text-xs">
+                  Digite um comando abaixo e pressione Enter.
+                </p>
+              </div>
+            )}
+
+            {/* Command history */}
+            {history.map((entry, idx) => {
+              const multiDevice = (entry.result?.results.length ?? 0) > 1;
+              return (
+                <div key={entry.jobId} className={idx > 0 ? "mt-3" : ""}>
+                  {/* Prompt + command */}
+                  <div className="flex items-start gap-2 font-mono text-sm">
+                    <span className="text-blue-400 flex-shrink-0 select-none leading-relaxed">
+                      {entry.powershell ? "PS >" : ">"}
+                    </span>
+                    <span className="text-slate-100 break-all leading-relaxed">
+                      {entry.cmd}
+                    </span>
+                  </div>
+
+                  {/* Output */}
+                  {entry.result ? (
+                    entry.result.results.map((r) => (
+                      <div key={r.device_id} className="mt-0.5">
+                        {multiDevice && (
+                          <div className="text-yellow-500 text-xs font-mono mt-1 select-none">
+                            ──{" "}
+                            {r.alias || r.hostname || r.rustdesk_id}
+                            {r.ip_address ? ` (${r.ip_address})` : ""} ──
+                          </div>
+                        )}
+                        {r.output && (
+                          <pre
+                            className={`font-mono text-sm whitespace-pre-wrap break-words leading-relaxed ${
+                              r.exit_code !== null && r.exit_code !== 0
+                                ? "text-rose-400"
+                                : "text-emerald-400"
+                            }`}
+                          >
+                            {r.output}
+                          </pre>
+                        )}
+                        {!r.done && (
+                          <span className="font-mono text-slate-500 text-sm animate-pulse">
+                            ▊
+                          </span>
+                        )}
+                        {r.done && r.exit_code !== null && r.exit_code !== 0 && (
+                          <p className="font-mono text-xs text-rose-500 select-none">
+                            exit code {r.exit_code}
+                          </p>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="font-mono text-sm text-slate-500 mt-0.5 animate-pulse">
+                      ▊ aguardando agente...
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Blinking cursor line when idle */}
+            {!anyRunning && history.length > 0 && (
+              <div className="flex items-center gap-2 font-mono text-sm mt-3 select-none">
+                <span className="text-blue-400">{prompt}</span>
+                <span className="text-slate-100 animate-pulse">▌</span>
+              </div>
+            )}
+          </div>
+
+          {/* ── Input bar ── */}
+          <div className="flex-shrink-0 border-t border-slate-700/60 px-5 py-3 flex items-center gap-2 bg-[#0d1117]">
+            <span className="text-blue-400 font-mono text-sm flex-shrink-0 select-none">
+              {prompt}
+            </span>
+            <input
+              ref={inputRef}
+              value={cmd}
+              onChange={(e) => {
+                setCmd(e.target.value);
+                setCmdHistoryIdx(-1);
+              }}
+              onKeyDown={onKeyDown}
+              disabled={anyRunning || noTenantSelected}
+              placeholder={
+                anyRunning
+                  ? "executando..."
+                  : noTenantSelected
+                  ? "selecione um cliente acima"
+                  : ""
+              }
+              className="flex-1 bg-transparent text-emerald-400 font-mono text-sm outline-none placeholder-slate-600 disabled:cursor-not-allowed caret-emerald-400"
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {anyRunning ? (
+              <span className="h-3 w-3 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin flex-shrink-0" />
+            ) : cmd.trim() ? (
+              <button
+                onClick={onRun}
+                className="text-xs font-mono text-slate-500 px-2 py-0.5 rounded border border-slate-700 hover:border-slate-500 hover:text-slate-300 transition-colors flex-shrink-0"
+              >
+                ↵
+              </button>
+            ) : null}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
