@@ -124,7 +124,8 @@ type ScriptProgressMsg struct {
 func runCommand(cmd Command, send func(Result)) {
 	var c *exec.Cmd
 	if cmd.PowerShell {
-		c = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", cmd.Cmd)
+		const writeHostFix = "function Write-Host { param([Parameter(ValueFromPipeline,Position=0)]$Object,[switch]$NoNewline,$ForegroundColor,$BackgroundColor,$Separator) Write-Output $Object }\n"
+		c = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", writeHostFix+cmd.Cmd)
 	} else {
 		c = exec.Command("cmd", "/C", cmd.Cmd)
 	}
@@ -220,7 +221,10 @@ func topoSort(nodes []ScriptNode, edges []ScriptEdge) []string {
 func runShellNodeStreaming(nodeCmd string, powershell bool, timeoutSec int, extraEnv map[string]string, onLine func(string)) (int, error) {
 	var c *exec.Cmd
 	if powershell {
-		c = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", nodeCmd)
+		// Override de Write-Host: o agente roda sem console (windowsgui), então Write-Host
+		// falha. Redirecionamos para Write-Output que vai pelo stdout capturado pelo agente.
+		const writeHostFix = "function Write-Host { param([Parameter(ValueFromPipeline,Position=0)]$Object,[switch]$NoNewline,$ForegroundColor,$BackgroundColor,$Separator) Write-Output $Object }\n"
+		c = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", writeHostFix+nodeCmd)
 	} else {
 		c = exec.Command("cmd", "/C", nodeCmd)
 	}

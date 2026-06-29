@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 // Bump este número ao mudar agent/main.go ou installer/main.go.
 // Todos os agentes já instalados se auto-atualizarão ao detectar a divergência.
-pub const INSTALLER_BUILD: &str = "8";
+pub const INSTALLER_BUILD: &str = "9";
 
 fn run(command: &mut Command, description: &str) -> anyhow::Result<()> {
     let output = command.output()?;
