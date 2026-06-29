@@ -368,19 +368,26 @@ export async function saveServerConfig(data: ServerConfig) {
 
 // ── Scripts ───────────────────────────────────────────────────────────────────
 
+export type ScriptVar = { key: string; value: string };
+
 export type ScriptNodeData = {
   label: string;
+  // shell
   command?: string;
   powershell?: boolean;
   timeout_seconds?: number;
+  // download
   url?: string;
   destination?: string;
+  // notify
   message?: string;
+  // variable
+  variables?: ScriptVar[];
 };
 
 export type ScriptNode = {
   id: string;
-  type: "shell" | "download" | "notify";
+  type: "shell" | "download" | "notify" | "variable";
   position: { x: number; y: number };
   data: ScriptNodeData;
 };

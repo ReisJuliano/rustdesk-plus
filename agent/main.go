@@ -68,14 +68,20 @@ type Result struct {
 
 // ── Protocolo — scripts ──────────────────────────────────────────────────────
 
+type ScriptVar struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 type ScriptNodeData struct {
-	Label          string `json:"label"`
-	Command        string `json:"command"`
-	PowerShell     bool   `json:"powershell"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	URL            string `json:"url"`
-	Destination    string `json:"destination"`
-	Message        string `json:"message"`
+	Label          string      `json:"label"`
+	Command        string      `json:"command"`
+	PowerShell     bool        `json:"powershell"`
+	TimeoutSeconds int         `json:"timeout_seconds"`
+	URL            string      `json:"url"`
+	Destination    string      `json:"destination"`
+	Message        string      `json:"message"`
+	Variables      []ScriptVar `json:"variables"` // nó de variáveis
 }
 
 type ScriptNode struct {
@@ -206,8 +212,8 @@ func topoSort(nodes []ScriptNode, edges []ScriptEdge) []string {
 }
 
 // runShellNodeStreaming executa um comando e faz streaming de output linha a linha via onLine.
-// Retorna exit_code e erro (apenas erros de sistema, não de exit_code != 0).
-func runShellNodeStreaming(nodeCmd string, powershell bool, timeoutSec int, onLine func(string)) (int, error) {
+// extraEnv são variáveis adicionais injetadas como env vars (além das do sistema).
+func runShellNodeStreaming(nodeCmd string, powershell bool, timeoutSec int, extraEnv map[string]string, onLine func(string)) (int, error) {
 	var c *exec.Cmd
 	if powershell {
 		c = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", nodeCmd)
@@ -215,6 +221,14 @@ func runShellNodeStreaming(nodeCmd string, powershell bool, timeoutSec int, onLi
 		c = exec.Command("cmd", "/C", nodeCmd)
 	}
 	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	// Injeta variáveis do nó Variable como env vars do processo
+	if len(extraEnv) > 0 {
+		env := os.Environ()
+		for k, v := range extraEnv {
+			env = append(env, k+"="+v)
+		}
+		c.Env = env
+	}
 
 	stdout, _ := c.StdoutPipe()
 	stderr, _ := c.StderrPipe()
@@ -273,6 +287,8 @@ func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
 	order := topoSort(msg.Nodes, msg.Edges)
 
 	overallStatus := "done"
+	// Variáveis acumuladas pelos nós Variable — injetadas como env vars nos nós seguintes
+	vars := make(map[string]string)
 
 	for i, nodeID := range order {
 		node, ok := nodeMap[nodeID]
@@ -286,6 +302,31 @@ func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
 		}
 
 		isLast := i == len(order)-1
+
+		// Nó de variáveis — acumula vars e marca done instantaneamente
+		if node.Type == "variable" {
+			for _, v := range node.Data.Variables {
+				vars[v.Key] = os.Expand(v.Value, func(k string) string {
+					if val, ok := vars[k]; ok {
+						return val
+					}
+					return os.Getenv(k)
+				})
+			}
+			doneCode := 0
+			sendProgress(ScriptProgressMsg{
+				Type:      "script_progress",
+				RunID:     msg.RunID,
+				ResultID:  msg.ResultID,
+				NodeID:    nodeID,
+				NodeLabel: label,
+				Status:    "done",
+				Output:    fmt.Sprintf("Variáveis definidas: %d\n", len(node.Data.Variables)),
+				ExitCode:  &doneCode,
+				AllDone:   isLast,
+			})
+			continue
+		}
 
 		// Nó de notificação — apenas visual, sem execução
 		if node.Type == "notify" {
@@ -337,7 +378,7 @@ func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
 
 		switch node.Type {
 		case "shell":
-			exitCode, _ = runShellNodeStreaming(node.Data.Command, node.Data.PowerShell, node.Data.TimeoutSeconds, streamLine)
+			exitCode, _ = runShellNodeStreaming(node.Data.Command, node.Data.PowerShell, node.Data.TimeoutSeconds, vars, streamLine)
 
 		case "download":
 			dest := node.Data.Destination
@@ -348,7 +389,7 @@ func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
 				`$ProgressPreference='SilentlyContinue'; New-Item -ItemType Directory -Force -Path (Split-Path '%s') | Out-Null; Invoke-WebRequest -Uri '%s' -OutFile '%s' -UseBasicParsing; Write-Host "Download concluido: %s"`,
 				dest, node.Data.URL, dest, dest,
 			)
-			exitCode, _ = runShellNodeStreaming(psCmd, true, node.Data.TimeoutSeconds, streamLine)
+			exitCode, _ = runShellNodeStreaming(psCmd, true, node.Data.TimeoutSeconds, vars, streamLine)
 
 		default:
 			finalOutput = "Tipo de nó desconhecido: " + node.Type + "\n"
