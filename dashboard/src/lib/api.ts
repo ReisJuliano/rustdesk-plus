@@ -366,6 +366,122 @@ export async function saveServerConfig(data: ServerConfig) {
   });
 }
 
+// ── Scripts ───────────────────────────────────────────────────────────────────
+
+export type ScriptNodeData = {
+  label: string;
+  command?: string;
+  powershell?: boolean;
+  timeout_seconds?: number;
+  url?: string;
+  destination?: string;
+  message?: string;
+};
+
+export type ScriptNode = {
+  id: string;
+  type: "shell" | "download" | "notify";
+  position: { x: number; y: number };
+  data: ScriptNodeData;
+};
+
+export type ScriptEdge = {
+  id: string;
+  source: string;
+  target: string;
+};
+
+export type ScriptDefinition = {
+  nodes: ScriptNode[];
+  edges: ScriptEdge[];
+};
+
+export type Script = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string;
+  definition: ScriptDefinition;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ScriptRunStep = {
+  id: string;
+  run_result_id: string;
+  node_id: string;
+  node_label: string;
+  status: "pending" | "running" | "done" | "failed";
+  output: string;
+  exit_code: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type ScriptRunResult = {
+  id: string;
+  device_id: string;
+  hostname: string | null;
+  alias: string | null;
+  rustdesk_id: string;
+  status: "pending" | "running" | "done" | "failed";
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  steps: ScriptRunStep[];
+};
+
+export type ScriptRun = {
+  id: string;
+  script_id: string | null;
+  script_name: string;
+  target_type: string;
+  target_ids: string[];
+  status: "pending" | "running" | "done" | "failed" | "partial";
+  created_at: string;
+  finished_at: string | null;
+  total_devices?: number;
+  done_devices?: number;
+  failed_devices?: number;
+};
+
+export async function listScripts() {
+  return request<Script[]>("/admin/scripts");
+}
+
+export async function createScript(data: { name: string; description?: string; definition?: ScriptDefinition }) {
+  return request<Script>("/admin/scripts", { method: "POST", body: JSON.stringify(data) });
+}
+
+export async function getScript(id: string) {
+  return request<Script>(`/admin/scripts/${id}`);
+}
+
+export async function updateScript(id: string, data: { name?: string; description?: string; definition?: ScriptDefinition }) {
+  return request<Script>(`/admin/scripts/${id}`, { method: "PUT", body: JSON.stringify(data) });
+}
+
+export async function deleteScript(id: string) {
+  return request<{ ok: boolean }>(`/admin/scripts/${id}`, { method: "DELETE" });
+}
+
+export async function runScript(id: string, body: { target_type: string; target_ids?: string[]; tag_id?: string }) {
+  return request<{ run_id: string; targets: number; sent: number }>(`/admin/scripts/${id}/run`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listScriptRuns(params?: { limit?: number; offset?: number }) {
+  const qs = params ? new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])).toString() : "";
+  return request<ScriptRun[]>(`/admin/script-runs${qs ? `?${qs}` : ""}`);
+}
+
+export async function getScriptRun(runId: string) {
+  return request<{ run: ScriptRun; results: ScriptRunResult[] }>(`/admin/script-runs/${runId}`);
+}
+
 export async function downloadInstaller() {
   const token = getToken();
   const activeTid = getActiveTenantId();

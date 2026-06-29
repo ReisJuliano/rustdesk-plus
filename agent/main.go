@@ -1,12 +1,10 @@
 package main
 
 // Agente RustDesk Plus — roda como serviço Windows em cada PC gerenciado.
-// Conecta ao plus-api via WebSocket e executa comandos remotos.
+// Conecta ao plus-api via WebSocket e executa comandos remotos e scripts de automação.
 //
 // Build:
 //   go build -ldflags "-X main.apiURL=http://SEU_IP:21114 -X main.deviceUUID=AUTO" -o rustdesk-agent.exe .
-//
-// O deviceUUID é lido do RustDesk2.toml se não for injetado via ldflags.
 
 import (
 	"bufio"
@@ -52,7 +50,7 @@ func getRustDeskID() string {
 	return strings.TrimSpace(string(output))
 }
 
-// ── Protocolo ────────────────────────────────────────────────────────────────
+// ── Protocolo — exec legado ──────────────────────────────────────────────────
 
 type Command struct {
 	JobID      string `json:"job_id"`
@@ -68,7 +66,50 @@ type Result struct {
 	Done       bool   `json:"done"`
 }
 
-// ── Execução de comando ──────────────────────────────────────────────────────
+// ── Protocolo — scripts ──────────────────────────────────────────────────────
+
+type ScriptNodeData struct {
+	Label          string `json:"label"`
+	Command        string `json:"command"`
+	PowerShell     bool   `json:"powershell"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	URL            string `json:"url"`
+	Destination    string `json:"destination"`
+	Message        string `json:"message"`
+}
+
+type ScriptNode struct {
+	ID   string         `json:"id"`
+	Type string         `json:"type"`
+	Data ScriptNodeData `json:"data"`
+}
+
+type ScriptEdge struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+type ScriptRunMsg struct {
+	Type     string       `json:"type"`
+	RunID    string       `json:"run_id"`
+	ResultID string       `json:"result_id"`
+	Nodes    []ScriptNode `json:"nodes"`
+	Edges    []ScriptEdge `json:"edges"`
+}
+
+type ScriptProgressMsg struct {
+	Type      string `json:"type"`
+	RunID     string `json:"run_id"`
+	ResultID  string `json:"result_id"`
+	NodeID    string `json:"node_id"`
+	NodeLabel string `json:"node_label"`
+	Status    string `json:"status"`
+	Output    string `json:"output"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+	AllDone   bool   `json:"all_done"`
+}
+
+// ── Execução de comando simples ──────────────────────────────────────────────
 
 func runCommand(cmd Command, send func(Result)) {
 	var c *exec.Cmd
@@ -127,6 +168,254 @@ func runCommand(cmd Command, send func(Result)) {
 	})
 }
 
+// ── Execução de script (nós em sequência) ────────────────────────────────────
+
+// topoSort retorna os IDs dos nós em ordem de execução (topological sort simples).
+func topoSort(nodes []ScriptNode, edges []ScriptEdge) []string {
+	inDegree := make(map[string]int)
+	next := make(map[string][]string)
+
+	for _, n := range nodes {
+		inDegree[n.ID] = 0
+	}
+	for _, e := range edges {
+		inDegree[e.Target]++
+		next[e.Source] = append(next[e.Source], e.Target)
+	}
+
+	var queue []string
+	for _, n := range nodes {
+		if inDegree[n.ID] == 0 {
+			queue = append(queue, n.ID)
+		}
+	}
+
+	var order []string
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		order = append(order, cur)
+		for _, tgt := range next[cur] {
+			inDegree[tgt]--
+			if inDegree[tgt] == 0 {
+				queue = append(queue, tgt)
+			}
+		}
+	}
+	return order
+}
+
+func runShellNode(nodeCmd string, powershell bool, timeoutSec int) (string, int, error) {
+	var c *exec.Cmd
+	if powershell {
+		c = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", nodeCmd)
+	} else {
+		c = exec.Command("cmd", "/C", nodeCmd)
+	}
+	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+
+	stdout, _ := c.StdoutPipe()
+	stderr, _ := c.StderrPipe()
+
+	if err := c.Start(); err != nil {
+		return "ERRO ao iniciar: " + err.Error() + "\n", -1, err
+	}
+
+	var buf bytes.Buffer
+	var wg sync.WaitGroup
+	capture := func(r io.Reader) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			buf.WriteString(scanner.Text() + "\n")
+		}
+	}
+
+	wg.Add(2)
+	go capture(stdout)
+	go capture(stderr)
+
+	done := make(chan error, 1)
+	go func() {
+		wg.Wait()
+		done <- c.Wait()
+	}()
+
+	timeout := time.Duration(timeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+
+	select {
+	case err := <-done:
+		exitCode := 0
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				exitCode = ee.ExitCode()
+			}
+		}
+		return buf.String(), exitCode, nil
+	case <-time.After(timeout):
+		c.Process.Kill()
+		return buf.String() + "\nTIMEOUT: comando excedeu " + fmt.Sprintf("%d", timeoutSec) + "s\n", -1, fmt.Errorf("timeout")
+	}
+}
+
+func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
+	nodeMap := make(map[string]ScriptNode)
+	for _, n := range msg.Nodes {
+		nodeMap[n.ID] = n
+	}
+
+	order := topoSort(msg.Nodes, msg.Edges)
+
+	overallStatus := "done"
+
+	for i, nodeID := range order {
+		node, ok := nodeMap[nodeID]
+		if !ok {
+			continue
+		}
+
+		label := node.Data.Label
+		if label == "" {
+			label = node.Type
+		}
+
+		isLast := i == len(order)-1
+
+		// Nó de notificação — apenas visual, sem execução
+		if node.Type == "notify" {
+			exitCode := 0
+			sendProgress(ScriptProgressMsg{
+				Type:      "script_progress",
+				RunID:     msg.RunID,
+				ResultID:  msg.ResultID,
+				NodeID:    nodeID,
+				NodeLabel: label,
+				Status:    "done",
+				Output:    node.Data.Message + "\n",
+				ExitCode:  &exitCode,
+				AllDone:   isLast,
+			})
+			continue
+		}
+
+		// Anuncia início do nó
+		sendProgress(ScriptProgressMsg{
+			Type:      "script_progress",
+			RunID:     msg.RunID,
+			ResultID:  msg.ResultID,
+			NodeID:    nodeID,
+			NodeLabel: label,
+			Status:    "running",
+			Output:    "",
+			AllDone:   false,
+		})
+
+		var output string
+		var exitCode int
+
+		switch node.Type {
+		case "shell":
+			output, exitCode, _ = runShellNode(node.Data.Command, node.Data.PowerShell, node.Data.TimeoutSeconds)
+
+		case "download":
+			dest := node.Data.Destination
+			if dest == "" {
+				dest = `C:\Temp\` + lastPathSegment(node.Data.URL)
+			}
+			psCmd := fmt.Sprintf(
+				`New-Item -ItemType Directory -Force -Path (Split-Path '%s') | Out-Null; Invoke-WebRequest -Uri '%s' -OutFile '%s' -UseBasicParsing`,
+				dest, node.Data.URL, dest,
+			)
+			output, exitCode, _ = runShellNode(psCmd, true, node.Data.TimeoutSeconds)
+
+		default:
+			output = "Tipo de nó desconhecido: " + node.Type + "\n"
+			exitCode = -1
+		}
+
+		nodeStatus := "done"
+		if exitCode != 0 {
+			nodeStatus = "failed"
+			overallStatus = "failed"
+		}
+
+		sendProgress(ScriptProgressMsg{
+			Type:      "script_progress",
+			RunID:     msg.RunID,
+			ResultID:  msg.ResultID,
+			NodeID:    nodeID,
+			NodeLabel: label,
+			Status:    nodeStatus,
+			Output:    output,
+			ExitCode:  &exitCode,
+			AllDone:   isLast,
+		})
+
+		// Para na falha para não executar nós dependentes com estado inconsistente
+		if nodeStatus == "failed" {
+			// Marca nós restantes como skipped
+			for _, remainingID := range order[i+1:] {
+				rem, ok := nodeMap[remainingID]
+				if !ok {
+					continue
+				}
+				remLabel := rem.Data.Label
+				if remLabel == "" {
+					remLabel = rem.Type
+				}
+				skippedCode := -1
+				sendProgress(ScriptProgressMsg{
+					Type:      "script_progress",
+					RunID:     msg.RunID,
+					ResultID:  msg.ResultID,
+					NodeID:    remainingID,
+					NodeLabel: remLabel,
+					Status:    "failed",
+					Output:    "Pulado devido a falha em passo anterior.\n",
+					ExitCode:  &skippedCode,
+					AllDone:   false,
+				})
+			}
+			// Envia all_done com status de falha
+			sendProgress(ScriptProgressMsg{
+				Type:      "script_progress",
+				RunID:     msg.RunID,
+				ResultID:  msg.ResultID,
+				NodeID:    nodeID,
+				NodeLabel: label,
+				Status:    overallStatus,
+				Output:    "",
+				AllDone:   true,
+			})
+			return
+		}
+	}
+
+	// Tudo concluído
+	if len(order) == 0 {
+		sendProgress(ScriptProgressMsg{
+			Type:     "script_progress",
+			RunID:    msg.RunID,
+			ResultID: msg.ResultID,
+			Status:   "done",
+			AllDone:  true,
+		})
+	}
+}
+
+func lastPathSegment(u string) string {
+	parts := strings.Split(u, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] != "" {
+			return parts[i]
+		}
+	}
+	return "download"
+}
+
 // ── Loop de conexão WebSocket ────────────────────────────────────────────────
 
 func connect(uuid string) {
@@ -144,6 +433,7 @@ func connect(uuid string) {
 	wsURL += "/ws/agent?" + query.Encode()
 
 	dialer := websocket.DefaultDialer
+	var mu sync.Mutex
 
 	for {
 		conn, _, err := dialer.Dial(wsURL, nil)
@@ -154,9 +444,20 @@ func connect(uuid string) {
 		}
 		fmt.Fprintf(os.Stdout, "[agent] conectado ao plus-api (%s)\n", wsURL)
 
-		send := func(r Result) {
-			data, _ := json.Marshal(r)
+		sendRaw := func(data []byte) {
+			mu.Lock()
+			defer mu.Unlock()
 			conn.WriteMessage(websocket.TextMessage, data)
+		}
+
+		sendResult := func(r Result) {
+			data, _ := json.Marshal(r)
+			sendRaw(data)
+		}
+
+		sendProgress := func(p ScriptProgressMsg) {
+			data, _ := json.Marshal(p)
+			sendRaw(data)
 		}
 
 		for {
@@ -165,12 +466,30 @@ func connect(uuid string) {
 				fmt.Fprintf(os.Stderr, "[agent] conexão perdida: %v\n", err)
 				break
 			}
-			var cmd Command
-			if err := json.NewDecoder(bytes.NewReader(msg)).Decode(&cmd); err != nil {
+
+			// Detecta tipo da mensagem
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(msg, &envelope); err != nil {
 				continue
 			}
-			fmt.Fprintf(os.Stdout, "[agent] executando job %s: %q\n", cmd.JobID, cmd.Cmd)
-			go runCommand(cmd, send)
+
+			switch envelope.Type {
+			case "script_run":
+				var scriptMsg ScriptRunMsg
+				if err := json.Unmarshal(msg, &scriptMsg); err == nil {
+					fmt.Fprintf(os.Stdout, "[agent] executando script run_id=%s\n", scriptMsg.RunID)
+					go runScript(scriptMsg, sendProgress)
+				}
+			default:
+				// Formato legado: { job_id, cmd, powershell }
+				var cmd Command
+				if err := json.NewDecoder(bytes.NewReader(msg)).Decode(&cmd); err == nil && cmd.JobID != "" {
+					fmt.Fprintf(os.Stdout, "[agent] executando job %s: %q\n", cmd.JobID, cmd.Cmd)
+					go runCommand(cmd, sendResult)
+				}
+			}
 		}
 
 		conn.Close()

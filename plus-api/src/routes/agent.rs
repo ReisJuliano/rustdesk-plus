@@ -82,8 +82,19 @@ async fn handle_agent(
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(result) = serde_json::from_str::<AgentResult>(&text) {
-                            let _ = persist_result(&state, tenant_id, result).await;
+                        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&text) {
+                            match raw.get("type").and_then(|v| v.as_str()) {
+                                Some("script_progress") => {
+                                    if let Ok(progress) = serde_json::from_value::<crate::routes::scripts::ScriptProgress>(raw) {
+                                        let _ = crate::routes::scripts::persist_script_progress(&state, progress).await;
+                                    }
+                                }
+                                _ => {
+                                    if let Ok(result) = serde_json::from_str::<AgentResult>(&text) {
+                                        let _ = persist_result(&state, tenant_id, result).await;
+                                    }
+                                }
+                            }
                         }
                     }
                     Some(Ok(Message::Ping(p))) => {

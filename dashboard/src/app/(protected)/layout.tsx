@@ -13,6 +13,8 @@ const navItems = [
     icon: <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M2 4.25A2.25 2.25 0 0 1 4.25 2h11.5A2.25 2.25 0 0 1 18 4.25v8.5A2.25 2.25 0 0 1 15.75 15h-3.105a3.501 3.501 0 0 1 1.1 1.677A.75.75 0 0 1 13 17.5H7a.75.75 0 0 1-.745-.823A3.501 3.501 0 0 1 7.355 15H4.25A2.25 2.25 0 0 1 2 12.75v-8.5Z" clipRule="evenodd" /></svg> },
   { href: "/terminal", label: "Terminal",
     icon: <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M3.25 3A2.25 2.25 0 0 0 1 5.25v9.5A2.25 2.25 0 0 0 3.25 17h13.5A2.25 2.25 0 0 0 19 14.75v-9.5A2.25 2.25 0 0 0 16.75 3H3.25Zm.943 8.752a.75.75 0 0 1 .055-1.06L6.836 9l-2.588-1.693a.75.75 0 1 1 .834-1.254l3.25 2.13a.75.75 0 0 1 0 1.254l-3.25 2.13a.75.75 0 0 1-1.06-.055ZM9.75 11.25a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5h-3.5Z" clipRule="evenodd" /></svg> },
+  { href: "/scripts", label: "Scripts",
+    icon: <svg viewBox="0 0 20 20" fill="currentColor"><path d="M4.75 3A1.75 1.75 0 0 0 3 4.75v2.752l.104-.002h13.792c.035 0 .07 0 .104.002V6.75A1.75 1.75 0 0 0 15.25 5H9.378a.25.25 0 0 1-.177-.073L7.823 3.549A1.75 1.75 0 0 0 6.586 3H4.75ZM3.104 9a1.75 1.75 0 0 0-1.673 2.265l1.385 4.5A1.75 1.75 0 0 0 4.489 17h11.022a1.75 1.75 0 0 0 1.673-1.235l1.385-4.5A1.75 1.75 0 0 0 16.896 9H3.104Z" /></svg> },
   { href: "/branches", label: "Filiais & Tags",
     icon: <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4 16.5v-13h-.25a.75.75 0 0 1 0-1.5h12.5a.75.75 0 0 1 0 1.5H16v13h.25a.75.75 0 0 1 0 1.5h-3.5a.75.75 0 0 1-.75-.75v-2.5a.75.75 0 0 0-.75-.75h-2.5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 1-.75.75h-3.5a.75.75 0 0 1 0-1.5H4Z" clipRule="evenodd" /></svg> },
   { href: "/users", label: "Usuários",

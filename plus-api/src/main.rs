@@ -46,6 +46,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .merge(routes::admin::router())
+        .merge(routes::scripts::router())
         .merge(routes::client::router())
         .merge(routes::agent::router())
         .merge(routes::setup::router())
