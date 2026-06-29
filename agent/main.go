@@ -205,7 +205,9 @@ func topoSort(nodes []ScriptNode, edges []ScriptEdge) []string {
 	return order
 }
 
-func runShellNode(nodeCmd string, powershell bool, timeoutSec int) (string, int, error) {
+// runShellNodeStreaming executa um comando e faz streaming de output linha a linha via onLine.
+// Retorna exit_code e erro (apenas erros de sistema, não de exit_code != 0).
+func runShellNodeStreaming(nodeCmd string, powershell bool, timeoutSec int, onLine func(string)) (int, error) {
 	var c *exec.Cmd
 	if powershell {
 		c = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", nodeCmd)
@@ -218,22 +220,22 @@ func runShellNode(nodeCmd string, powershell bool, timeoutSec int) (string, int,
 	stderr, _ := c.StderrPipe()
 
 	if err := c.Start(); err != nil {
-		return "ERRO ao iniciar: " + err.Error() + "\n", -1, err
+		onLine("ERRO ao iniciar: " + err.Error())
+		return -1, err
 	}
 
-	var buf bytes.Buffer
 	var wg sync.WaitGroup
-	capture := func(r io.Reader) {
+	stream := func(r io.Reader) {
 		defer wg.Done()
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
-			buf.WriteString(scanner.Text() + "\n")
+			onLine(scanner.Text())
 		}
 	}
 
 	wg.Add(2)
-	go capture(stdout)
-	go capture(stderr)
+	go stream(stdout)
+	go stream(stderr)
 
 	done := make(chan error, 1)
 	go func() {
@@ -254,10 +256,11 @@ func runShellNode(nodeCmd string, powershell bool, timeoutSec int) (string, int,
 				exitCode = ee.ExitCode()
 			}
 		}
-		return buf.String(), exitCode, nil
+		return exitCode, nil
 	case <-time.After(timeout):
 		c.Process.Kill()
-		return buf.String() + "\nTIMEOUT: comando excedeu " + fmt.Sprintf("%d", timeoutSec) + "s\n", -1, fmt.Errorf("timeout")
+		onLine(fmt.Sprintf("\nTIMEOUT: comando excedeu %ds e foi encerrado.", timeoutSec))
+		return -1, fmt.Errorf("timeout")
 	}
 }
 
@@ -313,12 +316,28 @@ func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
 			AllDone:   false,
 		})
 
-		var output string
 		var exitCode int
+		// finalOutput é o output enviado NA mensagem de conclusão do nó.
+		// Para shell/download, o output já foi streamado linha a linha — a msg final fica vazia.
+		// Para tipos desconhecidos, enviamos o erro direto na msg final.
+		var finalOutput string
+
+		streamLine := func(line string) {
+			sendProgress(ScriptProgressMsg{
+				Type:      "script_progress",
+				RunID:     msg.RunID,
+				ResultID:  msg.ResultID,
+				NodeID:    nodeID,
+				NodeLabel: label,
+				Status:    "running",
+				Output:    line + "\n",
+				AllDone:   false,
+			})
+		}
 
 		switch node.Type {
 		case "shell":
-			output, exitCode, _ = runShellNode(node.Data.Command, node.Data.PowerShell, node.Data.TimeoutSeconds)
+			exitCode, _ = runShellNodeStreaming(node.Data.Command, node.Data.PowerShell, node.Data.TimeoutSeconds, streamLine)
 
 		case "download":
 			dest := node.Data.Destination
@@ -326,13 +345,13 @@ func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
 				dest = `C:\Temp\` + lastPathSegment(node.Data.URL)
 			}
 			psCmd := fmt.Sprintf(
-				`New-Item -ItemType Directory -Force -Path (Split-Path '%s') | Out-Null; Invoke-WebRequest -Uri '%s' -OutFile '%s' -UseBasicParsing`,
-				dest, node.Data.URL, dest,
+				`$ProgressPreference='SilentlyContinue'; New-Item -ItemType Directory -Force -Path (Split-Path '%s') | Out-Null; Invoke-WebRequest -Uri '%s' -OutFile '%s' -UseBasicParsing; Write-Host "Download concluido: %s"`,
+				dest, node.Data.URL, dest, dest,
 			)
-			output, exitCode, _ = runShellNode(psCmd, true, node.Data.TimeoutSeconds)
+			exitCode, _ = runShellNodeStreaming(psCmd, true, node.Data.TimeoutSeconds, streamLine)
 
 		default:
-			output = "Tipo de nó desconhecido: " + node.Type + "\n"
+			finalOutput = "Tipo de nó desconhecido: " + node.Type + "\n"
 			exitCode = -1
 		}
 
@@ -349,7 +368,7 @@ func runScript(msg ScriptRunMsg, sendProgress func(ScriptProgressMsg)) {
 			NodeID:    nodeID,
 			NodeLabel: label,
 			Status:    nodeStatus,
-			Output:    output,
+			Output:    finalOutput,
 			ExitCode:  &exitCode,
 			AllDone:   isLast,
 		})

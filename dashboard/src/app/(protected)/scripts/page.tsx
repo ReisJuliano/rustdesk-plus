@@ -688,6 +688,7 @@ function ExecuteTab() {
   const [activeRun, setActiveRun] = useState<{ run_id: string; results: ScriptRunResult[] } | null>(null);
   const [expandedDevice, setExpandedDevice] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollStartRef = useRef<number>(0);
 
   useEffect(() => {
     Promise.all([listScripts(), listDevices(), listTags()]).then(([s, d, t]) => {
@@ -716,7 +717,14 @@ function ExecuteTab() {
 
   function startPolling(runId: string) {
     setActiveRun({ run_id: runId, results: [] });
+    pollStartRef.current = Date.now();
     pollRef.current = setInterval(async () => {
+      // Timeout de segurança: para de polear após 20 minutos
+      if (Date.now() - pollStartRef.current > 20 * 60 * 1000) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        setRunning(false);
+        return;
+      }
       try {
         const data = await getScriptRun(runId);
         setActiveRun({ run_id: runId, results: data.results });
