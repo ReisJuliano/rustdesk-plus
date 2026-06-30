@@ -17,7 +17,40 @@ type HistoryEntry = {
   result: ExecJobResult | null;
   running: boolean;
   startedAt: number; // Date.now()
+  cwd: string | null;
 };
+
+const CWD_SENTINEL = "__TRIVIO_CWD__";
+
+function wrapForCwd(cmd: string, isPowershell: boolean): string {
+  if (isPowershell) {
+    return `${cmd}; Write-Host "${CWD_SENTINEL}:$(Get-Location)"`;
+  }
+  return `${cmd} & echo ${CWD_SENTINEL}:%CD%`;
+}
+
+function extractCwd(output: string): string | null {
+  const lines = output.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].startsWith(CWD_SENTINEL + ":")) {
+      return lines[i].slice(CWD_SENTINEL.length + 1).trim();
+    }
+  }
+  return null;
+}
+
+function stripSentinel(output: string): string {
+  return output
+    .split(/\r?\n/)
+    .filter((l) => !l.startsWith(CWD_SENTINEL + ":"))
+    .join("\n")
+    .trimEnd();
+}
+
+function buildPrompt(isPowershell: boolean, cwd: string | null): string {
+  if (isPowershell) return cwd ? `PS ${cwd}>` : "PS>";
+  return cwd ? `${cwd}>` : ">";
+}
 
 export default function TerminalPage() {
   const user = getStoredUser();
@@ -31,6 +64,7 @@ export default function TerminalPage() {
   const [selectedTag, setSelectedTag] = useState("");
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [powershell, setPowershell] = useState(true);
+  const [currentDir, setCurrentDir] = useState<string | null>(null);
   const [cmd, setCmd] = useState("");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [cmdHistory, setCmdHistory] = useState<string[]>([]);
@@ -47,7 +81,7 @@ export default function TerminalPage() {
   // tick increments every second while running, forcing re-render so elapsed times update
   const now = tick >= 0 && anyRunning ? Date.now() : 0;
   const noTenantSelected = superAdmin && !selectedTenantId;
-  const prompt = powershell ? "PS >" : ">";
+  const prompt = buildPrompt(powershell, currentDir);
 
   // Tick every second while any command is running (for elapsed timer)
   useEffect(() => {
@@ -105,6 +139,7 @@ export default function TerminalPage() {
 
     if (trimmed.toLowerCase() === "clear" || trimmed.toLowerCase() === "cls") {
       setHistory([]);
+      setCurrentDir(null);
       setCmd("");
       setCmdHistoryIdx(-1);
       return;
@@ -115,7 +150,7 @@ export default function TerminalPage() {
     setCmdHistoryIdx(-1);
     setCmdHistory((prev) => [trimmed, ...prev.slice(0, 49)]);
 
-    const body: Parameters<typeof execCommand>[0] = { cmd: trimmed, powershell };
+    const body: Parameters<typeof execCommand>[0] = { cmd: wrapForCwd(trimmed, powershell), powershell };
     if (targetMode === "tag" && selectedTag) body.tag_id = selectedTag;
     if (targetMode === "device" && selectedDeviceId) {
       const dev = devices.find((d) => d.id === selectedDeviceId);
@@ -125,7 +160,7 @@ export default function TerminalPage() {
     const placeholderId = `pending-${Date.now()}`;
     setHistory((prev) => [
       ...prev,
-      { jobId: placeholderId, cmd: trimmed, powershell, result: null, running: true, startedAt: Date.now() },
+      { jobId: placeholderId, cmd: trimmed, powershell, result: null, running: true, startedAt: Date.now(), cwd: currentDir },
     ]);
 
     try {
@@ -187,6 +222,12 @@ export default function TerminalPage() {
           if (allDone) {
             clearInterval(interval);
             pollsRef.current.delete(jobId);
+            // Extract CWD from last finished result
+            const last = r.results[r.results.length - 1];
+            if (last?.output) {
+              const cwd = extractCwd(last.output);
+              if (cwd) setCurrentDir(cwd);
+            }
             setTimeout(() => inputRef.current?.focus(), 50);
           }
         } catch {
@@ -447,8 +488,8 @@ export default function TerminalPage() {
                 <div key={entry.jobId} className={idx > 0 ? "mt-3" : ""}>
                   {/* Prompt + command */}
                   <div className="flex items-start gap-2 font-mono text-sm">
-                    <span className="text-blue-400 flex-shrink-0 select-none leading-relaxed">
-                      {entry.powershell ? "PS >" : ">"}
+                    <span className="text-blue-400 flex-shrink-0 select-none leading-relaxed whitespace-nowrap">
+                      {buildPrompt(entry.powershell, entry.cwd)}
                     </span>
                     <span className="text-slate-100 break-all leading-relaxed">
                       {entry.cmd}
@@ -466,17 +507,20 @@ export default function TerminalPage() {
                             {r.ip_address ? ` (${r.ip_address})` : ""} ──
                           </div>
                         )}
-                        {r.output && (
-                          <pre
-                            className={`font-mono text-sm whitespace-pre-wrap break-words leading-relaxed ${
-                              r.exit_code !== null && r.exit_code !== 0
-                                ? "text-rose-400"
-                                : "text-emerald-400"
-                            }`}
-                          >
-                            {r.output}
-                          </pre>
-                        )}
+                        {r.output && (() => {
+                          const clean = stripSentinel(r.output);
+                          return clean ? (
+                            <pre
+                              className={`font-mono text-sm whitespace-pre-wrap break-words leading-relaxed ${
+                                r.exit_code !== null && r.exit_code !== 0
+                                  ? "text-rose-400"
+                                  : "text-emerald-400"
+                              }`}
+                            >
+                              {clean}
+                            </pre>
+                          ) : null;
+                        })()}
                         {!r.done && (
                           <span className="font-mono text-slate-500 text-sm">
                             <span className="animate-pulse">▊</span>
