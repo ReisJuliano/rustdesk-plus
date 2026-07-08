@@ -44,6 +44,7 @@ export type Device = {
   last_seen_at: string | null;
   online: boolean;
   created_at: string;
+  deleted_at: string | null;
 };
 
 export type Tag = {
@@ -93,6 +94,7 @@ export type ServerConfig = {
   api_url: string;
   rustdesk_password: string;
   install_code: string;
+  agent_enabled?: boolean;
 };
 
 export type SetupStatus = Omit<ServerConfig, "rustdesk_password"> & {
@@ -251,12 +253,14 @@ export async function listDevices(filter: {
   search?: string;
   online?: boolean;
   favorite?: boolean;
+  deleted?: boolean;
 } = {}) {
   const params = new URLSearchParams();
   if (filter.branch_id) params.set("branch_id", filter.branch_id);
   if (filter.search) params.set("search", filter.search);
   if (filter.online !== undefined) params.set("online", String(filter.online));
   if (filter.favorite !== undefined) params.set("favorite", String(filter.favorite));
+  if (filter.deleted !== undefined) params.set("deleted", String(filter.deleted));
   const qs = params.toString();
   return request<Device[]>(`/admin/devices${qs ? `?${qs}` : ""}`);
 }
@@ -267,6 +271,14 @@ export async function getDevice(id: string) {
 
 export async function deleteDevice(id: string) {
   return request<{ ok: boolean }>(`/admin/devices/${id}`, { method: "DELETE" });
+}
+
+export async function restoreDevice(id: string) {
+  return request<{ ok: boolean }>(`/admin/devices/${id}/restore`, { method: "POST" });
+}
+
+export async function purgeDevice(id: string) {
+  return request<{ ok: boolean }>(`/admin/devices/${id}/purge`, { method: "DELETE" });
 }
 
 export async function patchDevice(id: string, data: { alias?: string; description?: string }) {
@@ -506,4 +518,83 @@ export async function downloadInstaller() {
     throw new Error(body.error || `request failed: ${res.status}`);
   }
   return res.blob();
+}
+
+// ── Cliente Customizado (branding por tenant) ─────────────────────────────────
+
+export type TenantBranding = {
+  tenant_id: string;
+  app_name: string;
+  file_name: string;
+  comp_name: string;
+  url_link: string;
+  custom_config: string;
+  rustdesk_ref: string;
+  build_status: "idle" | "queued" | "building" | "ready" | "failed";
+  build_run_id: number | null;
+  artifact_url: string | null;
+  build_error: string | null;
+  built_at: string | null;
+  updated_at: string;
+};
+
+export type BrandingResponse = {
+  enabled: boolean;
+  branding: TenantBranding | null;
+  has_icon: boolean;
+};
+
+export async function getBranding() {
+  return request<BrandingResponse>("/admin/branding");
+}
+
+export async function saveBranding(data: {
+  app_name: string;
+  file_name: string;
+  comp_name?: string;
+  url_link?: string;
+  custom_config?: string;
+  rustdesk_ref?: string;
+}) {
+  return request<{ ok: boolean }>("/admin/branding", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function uploadBrandingIcon(file: File) {
+  const token = getToken();
+  const activeTid = getActiveTenantId();
+  const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (activeTid) headers["X-Tenant-Id"] = activeTid;
+  const res = await fetch(`${API_URL}/admin/branding/icon`, { method: "POST", headers, body: file });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error || `upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function triggerBrandingBuild() {
+  return request<{ ok: boolean; status: string }>("/admin/branding/build", { method: "POST" });
+}
+
+export async function downloadBrandedClient() {
+  const token = getToken();
+  const activeTid = getActiveTenantId();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (activeTid) headers["X-Tenant-Id"] = activeTid;
+  const res = await fetch(`${API_URL}/admin/branding/download`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error || `request failed: ${res.status}`);
+  }
+  return res.blob();
+}
+
+export function brandingIconUrl(tenantId: string, version?: string) {
+  const v = version ? `?v=${encodeURIComponent(version)}` : "";
+  return `${API_URL}/api/branding/${tenantId}/icon.png${v}`;
 }

@@ -131,6 +131,7 @@ async fn heartbeat_inner(
             last_seen_at = now(),
             online       = true,
             online_since = CASE WHEN devices.online = false THEN now() ELSE devices.online_since END
+        WHERE devices.deleted_at IS NULL
         "#,
     )
     .bind(&body.id)
@@ -227,6 +228,7 @@ async fn sysinfo_inner(
             last_seen_at = now(),
             online       = true,
             online_since = CASE WHEN devices.online = false THEN now() ELSE devices.online_since END
+        WHERE devices.deleted_at IS NULL
         "#,
     )
     .bind(&body.id)

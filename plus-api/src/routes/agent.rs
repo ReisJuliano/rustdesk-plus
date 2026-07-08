@@ -46,6 +46,19 @@ async fn handle_agent(
         return;
     };
 
+    // Interruptor global (env AGENT_ENABLED): se o agente está desligado, recusa a conexão.
+    // Agentes novos recebem "disable" e hibernam; agentes antigos apenas caem e reconectam.
+    if !crate::config::agent_enabled() {
+        let _ = socket
+            .send(Message::Text(String::from("{\"type\":\"disable\"}").into()))
+            .await;
+        if let Some(dev) = resolve_device_uuid(&state, tenant_id, &uuid).await {
+            update_agent_presence(&state, tenant_id, &dev, false).await;
+        }
+        tracing::info!("agente recusado (AGENT_ENABLED=false): uuid={uuid} tenant={tenant_id}");
+        return;
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let registered_uuid = match ensure_agent_device(&state, tenant_id, &params).await {
         Some(device_uuid) => device_uuid,
@@ -67,6 +80,14 @@ async fn handle_agent(
     loop {
         tokio::select! {
             _ = presence_interval.tick() => {
+                // Reavalia o interruptor global: desligar AGENT_ENABLED derruba o agente em até 20s.
+                if !crate::config::agent_enabled() {
+                    let _ = socket
+                        .send(Message::Text(String::from("{\"type\":\"disable\"}").into()))
+                        .await;
+                    tracing::info!("agente desligado em runtime — desconectando: {registered_uuid} (tenant={tenant_id})");
+                    break;
+                }
                 update_agent_presence(&state, tenant_id, &registered_uuid, true).await;
             }
             cmd = rx.recv() => {
@@ -133,7 +154,7 @@ async fn ensure_agent_device(state: &AppState, tenant_id: Uuid, params: &AgentPa
                 last_seen_at = now(),
                 online = true,
                 online_since = CASE WHEN online = false THEN now() ELSE online_since END
-            WHERE rustdesk_id = $1 AND tenant_id = $4
+            WHERE rustdesk_id = $1 AND tenant_id = $4 AND deleted_at IS NULL
             RETURNING uuid
             "#,
         )
@@ -168,6 +189,7 @@ async fn ensure_agent_device(state: &AppState, tenant_id: Uuid, params: &AgentPa
             last_seen_at = now(),
             online = true,
             online_since = CASE WHEN devices.online = false THEN now() ELSE devices.online_since END
+        WHERE devices.deleted_at IS NULL
         RETURNING uuid
         "#,
     )
@@ -176,11 +198,13 @@ async fn ensure_agent_device(state: &AppState, tenant_id: Uuid, params: &AgentPa
     .bind(hostname)
     .bind(&params.os)
     .bind(tenant_id)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await;
 
     match result {
-        Ok(uuid) => Some(uuid),
+        Ok(Some(uuid)) => Some(uuid),
+        // Dispositivo existe mas está na lixeira (deleted_at): não recria até restaurar.
+        Ok(None) => None,
         Err(error) => {
             tracing::warn!("failed to register agent device {}: {error:?}", params.uuid);
             None

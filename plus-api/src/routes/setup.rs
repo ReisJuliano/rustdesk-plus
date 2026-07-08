@@ -30,6 +30,7 @@ async fn status(State(state): State<AppState>) -> Result<Json<serde_json::Value>
         "server_ip": cfg.server_ip,
         "server_key": cfg.server_key,
         "api_url": cfg.api_url,
+        "agent_enabled": config::agent_enabled(),
     })))
 }
 

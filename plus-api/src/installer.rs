@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 // Bump este número ao mudar agent/main.go ou installer/main.go.
 // Todos os agentes já instalados se auto-atualizarão ao detectar a divergência.
-pub const INSTALLER_BUILD: &str = "9";
+pub const INSTALLER_BUILD: &str = "10";
 
 fn run(command: &mut Command, description: &str) -> anyhow::Result<()> {
     let output = command.output()?;
@@ -54,6 +54,8 @@ pub fn build(
         anyhow::bail!("configure o servidor antes de baixar o instalador");
     }
 
+    let agent_on = crate::config::agent_enabled();
+
     let generated_dir = generated_dir();
     let output_path = generated_dir.join(format!("installer-{tenant_id}.exe"));
     let agent_path = generated_dir.join(format!("agent-{tenant_id}.exe"));
@@ -65,11 +67,12 @@ pub fn build(
         m["_build"] = serde_json::Value::String(INSTALLER_BUILD.to_string());
         m["_tenant"] = serde_json::Value::String(tenant_id.to_string());
         m["_install_code"] = serde_json::Value::String(install_code.to_string());
+        m["_agent"] = serde_json::Value::Bool(agent_on);
         serde_json::to_vec(&m)?
     };
 
     if output_path.exists()
-        && agent_path.exists()
+        && (!agent_on || agent_path.exists())
         && fs::read(&metadata_path)
             .map(|value| value == expected_metadata)
             .unwrap_or(false)
@@ -95,33 +98,40 @@ pub fn build(
         )?;
     }
 
-    run(
-        Command::new("go")
-            .current_dir(&agent_dir)
-            .args(["mod", "tidy"]),
-        "preparação das dependências do agente",
-    )?;
-
     let agent_exe = installer_dir.join("rustdesk-agent.exe");
-    let agent_ldflags = format!(
-        "-s -w -H=windowsgui -X main.apiURL={} -X main.tenantID={} -X main.installCode={} -X main.agentVersion={}",
-        config.api_url, tenant_id, install_code, INSTALLER_BUILD
-    );
-    run(
-        Command::new("go")
-            .current_dir(&agent_dir)
-            .env("CGO_ENABLED", "0")
-            .env("GOOS", "windows")
-            .env("GOARCH", "amd64")
-            .args(["build", "-trimpath", "-ldflags", &agent_ldflags, "-o"])
-            .arg(&agent_exe)
-            .arg("."),
-        "build do agente",
-    )?;
+    if agent_on {
+        run(
+            Command::new("go")
+                .current_dir(&agent_dir)
+                .args(["mod", "tidy"]),
+            "preparação das dependências do agente",
+        )?;
 
-    // Salva o binário do agente separado (usado pelo auto-update)
-    fs::create_dir_all(&generated_dir)?;
-    fs::copy(&agent_exe, &agent_path)?;
+        let agent_ldflags = format!(
+            "-s -w -H=windowsgui -X main.apiURL={} -X main.tenantID={} -X main.installCode={} -X main.agentVersion={}",
+            config.api_url, tenant_id, install_code, INSTALLER_BUILD
+        );
+        run(
+            Command::new("go")
+                .current_dir(&agent_dir)
+                .env("CGO_ENABLED", "0")
+                .env("GOOS", "windows")
+                .env("GOARCH", "amd64")
+                .args(["build", "-trimpath", "-ldflags", &agent_ldflags, "-o"])
+                .arg(&agent_exe)
+                .arg("."),
+            "build do agente",
+        )?;
+
+        // Salva o binário do agente separado (usado pelo auto-update)
+        fs::create_dir_all(&generated_dir)?;
+        fs::copy(&agent_exe, &agent_path)?;
+    } else {
+        // Agente desligado: placeholder vazio só para o //go:embed do instalador
+        // compilar. O instalador não o instalará (flag main.agentEnabled=false).
+        fs::write(&agent_exe, [])?;
+        let _ = fs::remove_file(&agent_path);
+    }
 
     run(
         Command::new("go")
@@ -131,8 +141,8 @@ pub fn build(
     )?;
 
     let installer_ldflags = format!(
-        "-s -w -H=windowsgui -X main.serverIP={} -X main.serverKey={} -X main.apiURL={} -X main.unattendedPassword={} -X main.tenantID={}",
-        config.server_ip, config.server_key, config.api_url, rustdesk_password, tenant_id
+        "-s -w -H=windowsgui -X main.serverIP={} -X main.serverKey={} -X main.apiURL={} -X main.unattendedPassword={} -X main.tenantID={} -X main.installCode={} -X main.agentEnabled={}",
+        config.server_ip, config.server_key, config.api_url, rustdesk_password, tenant_id, install_code, agent_on
     );
     let temporary_output = work_root.join("rustdesk-installer.exe");
     run(

@@ -51,6 +51,7 @@ pub struct Device {
     pub last_seen_at: Option<DateTime<Utc>>,
     pub online: bool,
     pub created_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -150,4 +151,36 @@ pub struct ExecRequest {
     pub powershell: Option<bool>,
     pub targets: Option<Vec<String>>,
     pub tag_id: Option<Uuid>,
+}
+
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct TenantBranding {
+    pub tenant_id: Uuid,
+    pub app_name: String,
+    pub file_name: String,
+    pub comp_name: String,
+    pub url_link: String,
+    pub custom_config: String,
+    pub rustdesk_ref: String,
+    pub build_status: String,
+    pub build_run_id: Option<i64>,
+    pub artifact_url: Option<String>,
+    pub build_error: Option<String>,
+    pub built_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveBranding {
+    pub app_name: String,
+    pub file_name: String,
+    #[serde(default)]
+    pub comp_name: String,
+    #[serde(default)]
+    pub url_link: String,
+    #[serde(default)]
+    pub custom_config: String,
+    #[serde(default)]
+    pub rustdesk_ref: Option<String>,
 }

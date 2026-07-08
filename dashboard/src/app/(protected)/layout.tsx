@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { setToken, setActiveTenant, getActiveTenantId, getActiveTenantName, isSuperAdmin } from "@/lib/api";
+import { setToken, setActiveTenant, getActiveTenantId, getActiveTenantName, isSuperAdmin, getSetupStatus } from "@/lib/api";
 import { getStoredUser, setStoredUser } from "@/lib/auth";
 
 const navItems = [
@@ -19,6 +19,8 @@ const navItems = [
     icon: <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4 16.5v-13h-.25a.75.75 0 0 1 0-1.5h12.5a.75.75 0 0 1 0 1.5H16v13h.25a.75.75 0 0 1 0 1.5h-3.5a.75.75 0 0 1-.75-.75v-2.5a.75.75 0 0 0-.75-.75h-2.5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 1-.75.75h-3.5a.75.75 0 0 1 0-1.5H4Z" clipRule="evenodd" /></svg> },
   { href: "/users", label: "Usuários",
     icon: <svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM14.5 9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM1.615 16.428a1.224 1.224 0 0 1-.569-1.175 6.002 6.002 0 0 1 11.908 0c.058.467-.172.92-.57 1.174A9.953 9.953 0 0 1 7 17a9.953 9.953 0 0 1-5.385-1.572ZM14.5 16h-.106c.07-.297.088-.611.048-.933a7.47 7.47 0 0 0-1.588-3.755 4.502 4.502 0 0 1 5.874 2.636.818.818 0 0 1-.36.98A7.465 7.465 0 0 1 14.5 16Z" /></svg> },
+  { href: "/custom-client", label: "Cliente Customizado",
+    icon: <svg viewBox="0 0 20 20" fill="currentColor"><path d="M15.98 1.804a1 1 0 0 0-1.96 0l-.24 1.192a1 1 0 0 1-.784.785l-1.192.238a1 1 0 0 0 0 1.962l1.192.238a1 1 0 0 1 .785.785l.238 1.192a1 1 0 0 0 1.962 0l.238-1.192a1 1 0 0 1 .785-.785l1.192-.238a1 1 0 0 0 0-1.962l-1.192-.238a1 1 0 0 1-.785-.785l-.238-1.192ZM6.949 5.684a1 1 0 0 0-1.898 0l-.683 2.051a1 1 0 0 1-.633.633l-2.051.683a1 1 0 0 0 0 1.898l2.051.684a1 1 0 0 1 .633.632l.683 2.051a1 1 0 0 0 1.898 0l.683-2.051a1 1 0 0 1 .633-.633l2.051-.683a1 1 0 0 0 0-1.898l-2.051-.683a1 1 0 0 1-.633-.633L6.95 5.684Z" /></svg> },
   { href: "/settings", label: "Configuração",
     icon: <svg viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1-1.187.447l-1.598-.54a6.993 6.993 0 0 1-1.929 1.115l-.33 1.652a1 1 0 0 1-.98.804H8.82a1 1 0 0 1-.98-.804l-.331-1.652a6.993 6.993 0 0 1-1.929-1.115l-1.598.54a1 1 0 0 1-1.186-.447l-1.18-2.044a1 1 0 0 1 .205-1.251l1.267-1.114a7.05 7.05 0 0 1 0-2.227L1.821 7.773a1 1 0 0 1-.206-1.25l1.18-2.045a1 1 0 0 1 1.187-.447l1.598.54A6.992 6.992 0 0 1 7.51 3.456l.33-1.652ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clipRule="evenodd" /></svg> },
 ];
@@ -33,6 +35,7 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
+  const [agentEnabled, setAgentEnabled] = useState(false);
   // Inicializa direto do sessionStorage para não ter flash de nav errado na primeira render
   const [activeTenantName, setActiveTenantName] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
@@ -67,6 +70,13 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
     setActiveTenantName(getActiveTenantName());
   }, [pathname]);
 
+  // Descobre se o agente está habilitado no servidor (env AGENT_ENABLED)
+  useEffect(() => {
+    getSetupStatus()
+      .then((s) => setAgentEnabled(!!s.agent_enabled))
+      .catch(() => {});
+  }, []);
+
   function logout() {
     setToken(null);
     setStoredUser(null);
@@ -97,6 +107,11 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
       ? superAdminWithTenantNavItems
       : superAdminNavItems
     : navItems;
+  // Esconde Terminal e Scripts quando o agente está desligado (AGENT_ENABLED=false)
+  const agentHrefs = ["/terminal", "/scripts"];
+  const visibleNavItems = agentEnabled
+    ? allNavItems
+    : allNavItems.filter((n) => !agentHrefs.includes(n.href));
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
@@ -113,7 +128,7 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
 
         {/* Nav */}
         <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {allNavItems.map(({ href, label, icon }) => {
+          {visibleNavItems.map(({ href, label, icon }) => {
             const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
             return (
               <Link key={href} href={href}

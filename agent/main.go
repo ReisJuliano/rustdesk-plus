@@ -528,6 +528,7 @@ func connect(uuid string) {
 			sendRaw(data)
 		}
 
+		disabled := false
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -544,6 +545,11 @@ func connect(uuid string) {
 			}
 
 			switch envelope.Type {
+			case "disable":
+				// O servidor desativou este agente para o tenant. Hiberna: fecha a
+				// conexão e reconecta em intervalo longo, sem executar nada.
+				fmt.Fprintln(os.Stdout, "[agent] desativado pelo servidor — hibernando")
+				disabled = true
 			case "script_run":
 				var scriptMsg ScriptRunMsg
 				if err := json.Unmarshal(msg, &scriptMsg); err == nil {
@@ -558,11 +564,19 @@ func connect(uuid string) {
 					go runCommand(cmd, sendResult)
 				}
 			}
+
+			if disabled {
+				break
+			}
 		}
 
 		conn.Close()
-		fmt.Fprintln(os.Stdout, "[agent] reconectando em 5s...")
-		time.Sleep(5 * time.Second)
+		reconnectDelay := 5 * time.Second
+		if disabled {
+			reconnectDelay = 5 * time.Minute
+		}
+		fmt.Fprintf(os.Stdout, "[agent] reconectando em %s...\n", reconnectDelay)
+		time.Sleep(reconnectDelay)
 	}
 }
 

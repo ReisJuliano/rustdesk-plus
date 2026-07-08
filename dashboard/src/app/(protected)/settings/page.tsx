@@ -150,7 +150,7 @@ export default function SettingsPage() {
                   required
                   value={config.server_ip}
                   onChange={(e) => setConfig((c) => ({ ...c, server_ip: e.target.value }))}
-                  placeholder="168.138.151.131"
+                  placeholder="192.0.2.10"
                   className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -159,7 +159,7 @@ export default function SettingsPage() {
                 <input
                   value={config.api_url}
                   onChange={(e) => setConfig((c) => ({ ...c, api_url: e.target.value }))}
-                  placeholder="http://168.138.151.131:21114"
+                  placeholder="http://192.0.2.10:21114"
                   className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>

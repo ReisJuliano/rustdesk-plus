@@ -256,6 +256,12 @@ async fn run_script(
     auth.require_admin()?;
     let tid = tenant_from_headers(&auth, &headers)?;
 
+    if !crate::config::agent_enabled() {
+        return Err(AppError::BadRequest(
+            "Agente de gerenciamento desativado (AGENT_ENABLED=false).".to_string(),
+        ));
+    }
+
     // Busca o script
     let script = sqlx::query_as::<_, Script>(
         "SELECT * FROM scripts WHERE id = $1 AND tenant_id = $2",

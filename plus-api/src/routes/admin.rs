@@ -18,7 +18,7 @@ use crate::{
     error::AppError,
     models::{
         Branch, CreateBranch, CreateTag, CreateTenant, CreateUser, Device, ExecRequest,
-        LoginRequest, PatchDevice, SaveServerConfig, SetDeviceBranch, Stats, Tag, Tenant, User,
+        LoginRequest, PatchDevice, SaveServerConfig, SetDeviceBranch, Stats, Tag, Tenant, TenantBranding, User,
     },
     state::{agent_key, AppState},
 };
@@ -36,6 +36,8 @@ pub fn router() -> Router<AppState> {
             get(get_device).delete(delete_device).post(patch_device),
         )
         .route("/admin/devices/:id", axum::routing::patch(patch_device_patch))
+        .route("/admin/devices/:id/restore", post(restore_device))
+        .route("/admin/devices/:id/purge", delete(purge_device))
         .route("/admin/devices/:id/branch", post(set_device_branch))
         .route("/admin/devices/:id/favorite", post(toggle_favorite))
         .route("/admin/devices/:id/tags", get(list_device_tags).post(add_device_tag))
@@ -51,6 +53,12 @@ pub fn router() -> Router<AppState> {
             get(get_server_config).post(save_server_config),
         )
         .route("/admin/installer", get(download_installer))
+        .route("/admin/branding", get(get_branding).post(save_branding))
+        .route("/admin/branding/icon", post(upload_icon))
+        .route("/admin/branding/build", post(trigger_build))
+        .route("/api/branding/:tenant/icon.png", get(serve_branding_icon))
+        .route("/admin/branding/download", get(download_branded_admin))
+        .route("/api/branded/:code", get(download_branded_public))
         // Endpoints públicos — por código de instalação (sem auth)
         .route("/i/:code", get(install_script))
         .route("/install/:code", get(install_binary))
@@ -118,8 +126,8 @@ async fn list_tenants(
     let tenants = sqlx::query_as::<_, TenantStats>(
         r#"
         SELECT t.id, t.name, t.slug, t.created_at,
-               (SELECT COUNT(*) FROM devices d WHERE d.tenant_id = t.id)              AS device_count,
-               (SELECT COUNT(*) FROM devices d WHERE d.tenant_id = t.id AND d.online) AS online_count,
+               (SELECT COUNT(*) FROM devices d WHERE d.tenant_id = t.id AND d.deleted_at IS NULL)              AS device_count,
+               (SELECT COUNT(*) FROM devices d WHERE d.tenant_id = t.id AND d.online AND d.deleted_at IS NULL) AS online_count,
                (SELECT COUNT(*) FROM users   u WHERE u.tenant_id = t.id)              AS user_count
         FROM tenants t
         ORDER BY t.created_at
@@ -318,6 +326,8 @@ pub struct DeviceFilter {
     pub search: Option<String>,
     pub online: Option<bool>,
     pub favorite: Option<bool>,
+    /// true = mostra apenas a lixeira (soft-deleted); false/ausente = apenas ativos.
+    pub deleted: Option<bool>,
 }
 
 async fn list_devices(
@@ -331,6 +341,7 @@ async fn list_devices(
         r#"
         SELECT * FROM devices
         WHERE tenant_id = $1
+          AND (CASE WHEN $6::boolean IS TRUE THEN deleted_at IS NOT NULL ELSE deleted_at IS NULL END)
           AND ($2::uuid IS NULL OR branch_id = $2)
           AND ($3::text IS NULL OR hostname ILIKE '%' || $3 || '%'
                                 OR rustdesk_id ILIKE '%' || $3 || '%'
@@ -345,6 +356,7 @@ async fn list_devices(
     .bind(filter.search)
     .bind(filter.online)
     .bind(filter.favorite)
+    .bind(filter.deleted)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(devices))
@@ -376,7 +388,45 @@ async fn delete_device(
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth.require_admin()?;
     let tid = tenant_from_headers(&auth, &headers)?;
-    sqlx::query("DELETE FROM devices WHERE id = $1 AND tenant_id = $2")
+    // Soft delete: marca deleted_at e derruba online. O heartbeat/sysinfo não recria
+    // (os UPSERTs têm WHERE devices.deleted_at IS NULL). Restaurável via /restore.
+    sqlx::query(
+        "UPDATE devices SET deleted_at = now(), online = false \
+         WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+    )
+        .bind(id)
+        .bind(tid)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn restore_device(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    sqlx::query("UPDATE devices SET deleted_at = NULL WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(tid)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Remoção permanente — só age sobre o que já está na lixeira (deleted_at IS NOT NULL).
+async fn purge_device(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    sqlx::query("DELETE FROM devices WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NOT NULL")
         .bind(id)
         .bind(tid)
         .execute(&state.db)
@@ -654,6 +704,12 @@ async fn exec_command(
     auth.require_admin()?;
     let tid = tenant_from_headers(&auth, &headers)?;
 
+    if !config::agent_enabled() {
+        return Err(AppError::BadRequest(
+            "Agente de gerenciamento desativado (AGENT_ENABLED=false).".to_string(),
+        ));
+    }
+
     let targets: Vec<String> = if let Some(t) = body.targets {
         t
     } else if let Some(tag_id) = body.tag_id {
@@ -661,7 +717,7 @@ async fn exec_command(
             r#"
             SELECT d.uuid FROM devices d
             JOIN device_tags dt ON dt.device_id = d.id
-            WHERE dt.tag_id = $1 AND d.online = true AND d.tenant_id = $2
+            WHERE dt.tag_id = $1 AND d.online = true AND d.tenant_id = $2 AND d.deleted_at IS NULL
             "#,
         )
         .bind(tag_id)
@@ -670,7 +726,7 @@ async fn exec_command(
         .await?
     } else {
         sqlx::query_scalar::<_, String>(
-            "SELECT uuid FROM devices WHERE online = true AND tenant_id = $1",
+            "SELECT uuid FROM devices WHERE online = true AND tenant_id = $1 AND deleted_at IS NULL",
         )
         .bind(tid)
         .fetch_all(&state.db)
@@ -688,7 +744,7 @@ async fn exec_command(
     .await?;
 
     let device_rows: Vec<(Uuid, String)> = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, uuid FROM devices WHERE uuid = ANY($1) AND tenant_id = $2",
+        "SELECT id, uuid FROM devices WHERE uuid = ANY($1) AND tenant_id = $2 AND deleted_at IS NULL",
     )
     .bind(&targets)
     .bind(tid)
@@ -814,9 +870,9 @@ async fn get_stats(
     let stats = sqlx::query_as::<_, Stats>(
         r#"
         SELECT
-          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1)                      AS total_devices,
-          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1 AND online = true)    AS online_devices,
-          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1 AND online = false)   AS offline_devices,
+          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1 AND deleted_at IS NULL)                    AS total_devices,
+          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1 AND online = true  AND deleted_at IS NULL) AS online_devices,
+          (SELECT COUNT(*)::bigint FROM devices  WHERE tenant_id = $1 AND online = false AND deleted_at IS NULL) AS offline_devices,
           (SELECT COUNT(*)::bigint FROM branches WHERE tenant_id = $1)                      AS total_branches,
           (SELECT COUNT(*)::bigint FROM users    WHERE tenant_id = $1)                      AS total_users
         "#,
@@ -924,6 +980,9 @@ async fn agent_binary_download(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Result<Response<Body>, AppError> {
+    if !config::agent_enabled() {
+        return Err(AppError::NotFound);
+    }
     let tenant_id = tenant_by_install_code(&state.db, &code)
         .await
         .ok_or(AppError::NotFound)?;
@@ -967,12 +1026,14 @@ async fn get_server_config(
     } else {
         (String::new(), String::new())
     };
+    let agent_enabled = config::agent_enabled();
     Ok(Json(json!({
         "server_ip": global.server_ip,
         "server_key": global.server_key,
         "api_url": global.api_url,
         "rustdesk_password": password,
         "install_code": install_code,
+        "agent_enabled": agent_enabled,
     })))
 }
 
@@ -1004,4 +1065,228 @@ async fn save_server_config(
     }
 
     Ok(Json(json!({ "ok": true })))
+}
+
+
+// ── Cliente Customizado (branding por tenant) ──────────────────────────────────
+
+async fn get_branding(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let tenant_id = tenant_from_headers(&auth, &headers)?;
+    auth.require_admin()?;
+    let b: Option<TenantBranding> = sqlx::query_as(
+        "SELECT tenant_id, app_name, file_name, comp_name, url_link, custom_config, rustdesk_ref, build_status, build_run_id, artifact_url, build_error, built_at, updated_at FROM tenant_branding WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let has_icon: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT icon_png IS NOT NULL FROM tenant_branding WHERE tenant_id = $1), false)",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "enabled": crate::builder::enabled(),
+        "branding": b,
+        "has_icon": has_icon,
+    })))
+}
+
+async fn save_branding(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Json(body): Json<crate::models::SaveBranding>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let tenant_id = tenant_from_headers(&auth, &headers)?;
+    auth.require_admin()?;
+    let rref = body
+        .rustdesk_ref
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "1.4.8".to_string());
+    sqlx::query(
+        "INSERT INTO tenant_branding (tenant_id, app_name, file_name, comp_name, url_link, custom_config, rustdesk_ref, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+         ON CONFLICT (tenant_id) DO UPDATE SET app_name = EXCLUDED.app_name, file_name = EXCLUDED.file_name, comp_name = EXCLUDED.comp_name, url_link = EXCLUDED.url_link, custom_config = EXCLUDED.custom_config, rustdesk_ref = EXCLUDED.rustdesk_ref, updated_at = now()",
+    )
+    .bind(tenant_id)
+    .bind(body.app_name.trim())
+    .bind(body.file_name.trim())
+    .bind(body.comp_name.trim())
+    .bind(body.url_link.trim())
+    .bind(&body.custom_config)
+    .bind(rref.trim())
+    .execute(&state.db)
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn upload_icon(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let tenant_id = tenant_from_headers(&auth, &headers)?;
+    auth.require_admin()?;
+    if body.is_empty() {
+        return Err(AppError::BadRequest("imagem vazia".to_string()));
+    }
+    sqlx::query(
+        "INSERT INTO tenant_branding (tenant_id, icon_png, updated_at) VALUES ($1, $2, now()) \
+         ON CONFLICT (tenant_id) DO UPDATE SET icon_png = EXCLUDED.icon_png, updated_at = now()",
+    )
+    .bind(tenant_id)
+    .bind(body.to_vec())
+    .execute(&state.db)
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn serve_branding_icon(
+    State(state): State<AppState>,
+    Path(tenant): Path<Uuid>,
+) -> Result<Response<Body>, AppError> {
+    let row: Option<(Option<Vec<u8>>,)> =
+        sqlx::query_as("SELECT icon_png FROM tenant_branding WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_optional(&state.db)
+            .await?;
+    let bytes = row.and_then(|r| r.0).ok_or(AppError::NotFound)?;
+    Response::builder()
+        .header(CONTENT_TYPE, "image/png")
+        .header(CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|e| anyhow::Error::new(e).into())
+}
+
+async fn trigger_build(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let tenant_id = tenant_from_headers(&auth, &headers)?;
+    auth.require_admin()?;
+    if !crate::builder::enabled() {
+        return Err(AppError::BadRequest("gerador de cliente desabilitado".to_string()));
+    }
+    let cfg = crate::builder::BuilderConfig::from_env().map_err(AppError::from)?;
+    let b: TenantBranding = sqlx::query_as(
+        "SELECT tenant_id, app_name, file_name, comp_name, url_link, custom_config, rustdesk_ref, build_status, build_run_id, artifact_url, build_error, built_at, updated_at FROM tenant_branding WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("configure o branding primeiro".to_string()))?;
+    if b.app_name.trim().is_empty() || b.file_name.trim().is_empty() {
+        return Err(AppError::BadRequest("app_name e file_name sao obrigatorios".to_string()));
+    }
+    let server = config::load(&state.db).await?;
+    if server.server_ip.trim().is_empty() || server.server_key.trim().is_empty() {
+        return Err(AppError::BadRequest("configure o servidor primeiro".to_string()));
+    }
+    let api_base = server.api_url.trim_end_matches('/').to_string();
+    let api_server = format!("{}/t/{}", api_base, tenant_id);
+    let has_icon: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT icon_png IS NOT NULL FROM tenant_branding WHERE tenant_id = $1), false)",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    let icon_url = if has_icon {
+        format!("{}/api/branding/{}/icon.png", api_base, tenant_id)
+    } else {
+        String::new()
+    };
+    let version = if b.rustdesk_ref.trim().is_empty() {
+        cfg.rustdesk_ref.clone()
+    } else {
+        b.rustdesk_ref.clone()
+    };
+    let artifact_name = b.file_name.clone();
+    let inputs = json!({
+        "version": version,
+        "appname": b.app_name,
+        "filename": b.file_name,
+        "compname": b.comp_name,
+        "urlLink": b.url_link,
+        "server": server.server_ip,
+        "key": server.server_key,
+        "apiServer": api_server,
+        "icon_url": icon_url,
+        "custom": b.custom_config,
+    });
+    sqlx::query(
+        "UPDATE tenant_branding SET build_status = 'queued', build_error = NULL, updated_at = now() WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .execute(&state.db)
+    .await?;
+    crate::builder::spawn_build(state.db.clone(), tenant_id, cfg, inputs, artifact_name);
+    Ok(Json(json!({ "ok": true, "status": "queued" })))
+}
+
+
+// ── Download do cliente com marca (branded-{tenant}.exe) ────────────────────────
+
+async fn serve_branded(state: &AppState, tenant_id: Uuid) -> Result<Response<Body>, AppError> {
+    let row: Option<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT build_status, artifact_url, file_name FROM tenant_branding WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (status, artifact, file_name) = row.ok_or(AppError::NotFound)?;
+    if status != "ready" {
+        return Err(AppError::NotFound);
+    }
+    let artifact = artifact.ok_or(AppError::NotFound)?;
+    let fname = if file_name.trim().is_empty() {
+        "rustdesk".to_string()
+    } else {
+        file_name
+    };
+    // Backend s3: artifact_url é uma URL pública/presigned → redireciona.
+    if artifact.starts_with("http://") || artifact.starts_with("https://") {
+        return Response::builder()
+            .status(axum::http::StatusCode::FOUND)
+            .header(axum::http::header::LOCATION, artifact)
+            .body(Body::empty())
+            .map_err(|e| anyhow::Error::new(e).into());
+    }
+    // Backend local: artifact_url é um caminho de arquivo.
+    let bytes = tokio::fs::read(&artifact).await.map_err(anyhow::Error::new)?;
+    Response::builder()
+        .header(CONTENT_TYPE, "application/vnd.microsoft.portable-executable")
+        .header(
+            CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{fname}.exe\""),
+        )
+        .header(CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(|e| anyhow::Error::new(e).into())
+}
+
+async fn download_branded_admin(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+) -> Result<Response<Body>, AppError> {
+    let tenant_id = tenant_from_headers(&auth, &headers)?;
+    auth.require_admin()?;
+    serve_branded(&state, tenant_id).await
+}
+
+async fn download_branded_public(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> Result<Response<Body>, AppError> {
+    let tenant_id = tenant_by_install_code(&state.db, &code)
+        .await
+        .ok_or(AppError::NotFound)?;
+    serve_branded(&state, tenant_id).await
 }

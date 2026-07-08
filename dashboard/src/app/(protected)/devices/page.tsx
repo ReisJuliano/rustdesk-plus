@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   listBranches, listDevices, setDeviceBranch, toggleFavorite,
-  deleteDevice, patchDevice, listTags, listDeviceTags, addDeviceTag, removeDeviceTag,
+  deleteDevice, restoreDevice, purgeDevice, patchDevice, listTags, listDeviceTags, addDeviceTag, removeDeviceTag,
   getAllDeviceTags, getServerConfig,
   type Branch, type Device, type Tag, type DeviceTagRow,
 } from "@/lib/api";
@@ -467,6 +467,62 @@ function DeviceCard({
   );
 }
 
+// ── Card da lixeira ────────────────────────────────────────────────────────────
+
+function TrashCard({
+  device, branches, onRefresh,
+}: {
+  device: Device; branches: Branch[]; onRefresh: () => void;
+}) {
+  const displayName = device.alias || device.hostname || device.rustdesk_id;
+  const branch = branches.find((b) => b.id === device.branch_id);
+
+  async function onRestore() {
+    await restoreDevice(device.id);
+    onRefresh();
+  }
+  async function onPurge() {
+    if (!confirm(`Excluir permanentemente "${displayName}"? Esta ação não pode ser desfeita.`)) return;
+    await purgeDevice(device.id);
+    onRefresh();
+  }
+
+  return (
+    <div className="relative bg-white rounded-2xl border border-slate-100 opacity-90 flex flex-col">
+      <div className="flex justify-center py-4">
+        <div className="h-14 w-14 rounded-2xl flex items-center justify-center bg-slate-100 text-slate-400">
+          <OsIcon os={device.os} className="h-7 w-7" />
+        </div>
+      </div>
+      <div className="px-3 text-center space-y-0.5">
+        <p className="text-sm font-semibold text-slate-700 truncate" title={displayName}>{displayName}</p>
+        <p className="text-xs text-slate-400">{device.os ?? "SO desconhecido"}</p>
+        <p className="text-xs text-slate-400 font-mono">{fmtId(device.rustdesk_id)}</p>
+        {branch && <p className="text-xs text-slate-300">{branch.name}</p>}
+        <p className="text-xs text-red-400">Removido {fmtLastSeen(device.deleted_at)}</p>
+      </div>
+      <div className="flex gap-2 px-3 pb-3 mt-3">
+        <button
+          onClick={onRestore}
+          className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl py-2 transition-colors"
+        >
+          Restaurar
+        </button>
+        <button
+          onClick={onPurge}
+          className="p-2 rounded-xl border border-red-200 text-red-500 hover:bg-red-50 transition-colors"
+          title="Excluir permanentemente"
+        >
+          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 type Filter = "all" | "online" | "offline" | "favorites";
@@ -485,15 +541,21 @@ export default function DevicesPage() {
   const [deviceTagMap, setDeviceTagMap] = useState<Map<string, Tag[]>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [rdPassword, setRdPassword] = useState("");
+  const [showTrash, setShowTrash] = useState(false);
 
   async function load() {
     try {
       const f: Record<string, unknown> = {};
-      if (branchFilter) f.branch_id = branchFilter;
-      if (search) f.search = search;
-      if (statusFilter === "online") f.online = true;
-      if (statusFilter === "offline") f.online = false;
-      if (statusFilter === "favorites") f.favorite = true;
+      if (showTrash) {
+        f.deleted = true;
+        if (search) f.search = search;
+      } else {
+        if (branchFilter) f.branch_id = branchFilter;
+        if (search) f.search = search;
+        if (statusFilter === "online") f.online = true;
+        if (statusFilter === "offline") f.online = false;
+        if (statusFilter === "favorites") f.favorite = true;
+      }
       const [d, b, allDT] = await Promise.all([listDevices(f), listBranches(), getAllDeviceTags()]);
 
       // Build device → tags map
@@ -531,7 +593,7 @@ export default function DevicesPage() {
     const iv = setInterval(load, 10000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [branchFilter, search, statusFilter, sortKey]);
+  }, [branchFilter, search, statusFilter, sortKey, showTrash]);
 
   const onlineCount = devices.filter((d) => d.online).length;
 
@@ -551,12 +613,19 @@ export default function DevicesPage() {
         {/* Header */}
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Dispositivos</h1>
-          <p className="text-slate-500 text-sm mt-1">
-            {devices.length} dispositivo{devices.length !== 1 ? "s" : ""} ·{" "}
-            <span className="text-emerald-600 font-medium">{onlineCount} online</span>
-            <span className="text-slate-300 mx-1">·</span>
-            <span className="text-slate-400">Clique em um card para configurar</span>
-          </p>
+          {showTrash ? (
+            <p className="text-slate-500 text-sm mt-1">
+              {devices.length} na lixeira ·{" "}
+              <span className="text-slate-400">Restaure ou exclua permanentemente</span>
+            </p>
+          ) : (
+            <p className="text-slate-500 text-sm mt-1">
+              {devices.length} dispositivo{devices.length !== 1 ? "s" : ""} ·{" "}
+              <span className="text-emerald-600 font-medium">{onlineCount} online</span>
+              <span className="text-slate-300 mx-1">·</span>
+              <span className="text-slate-400">Clique em um card para configurar</span>
+            </p>
+          )}
         </div>
 
         {/* Filters */}
@@ -601,8 +670,23 @@ export default function DevicesPage() {
             <option value="branch">↕ Filial</option>
           </select>
 
+          {/* Lixeira toggle */}
+          <button
+            onClick={() => setShowTrash((v) => !v)}
+            className={`ml-auto flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-medium transition-colors ${
+              showTrash ? "border-red-300 bg-red-50 text-red-600" : "border-slate-200 text-slate-500 hover:bg-slate-50"
+            }`}
+            title="Dispositivos removidos"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+            </svg>
+            Lixeira
+          </button>
+
           {/* View mode toggle */}
-          <div className="flex rounded-xl border border-slate-200 overflow-hidden ml-auto">
+          <div className="flex rounded-xl border border-slate-200 overflow-hidden">
             {([
               { mode: "grid" as ViewMode, icon: "⊞", title: "Cards" },
               { mode: "list" as ViewMode, icon: "☰", title: "Lista" },
@@ -620,8 +704,8 @@ export default function DevicesPage() {
           <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{error}</div>
         )}
 
-        {/* Grid */}
-        {devices.length === 0 ? (
+        {/* Grid (visão normal) */}
+        {!showTrash && (devices.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
             <div className="h-16 w-16 rounded-2xl bg-slate-100 flex items-center justify-center mb-4">
               <svg className="h-8 w-8 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -721,7 +805,29 @@ export default function DevicesPage() {
               </div>
             )}
           </>
-        )}
+        ))}
+
+        {/* Lixeira */}
+        {showTrash && (devices.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <div className="h-16 w-16 rounded-2xl bg-slate-100 flex items-center justify-center mb-4">
+              <svg className="h-8 w-8 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              </svg>
+            </div>
+            <p className="text-slate-500 font-medium">Lixeira vazia</p>
+            <p className="text-slate-400 text-sm mt-1">
+              Dispositivos removidos aparecem aqui e podem ser restaurados.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-4">
+            {devices.map((d) => (
+              <TrashCard key={d.id} device={d} branches={branches} onRefresh={load} />
+            ))}
+          </div>
+        ))}
       </div>
     </>
   );

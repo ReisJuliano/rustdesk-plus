@@ -62,6 +62,16 @@ pub async fn save_tenant_password(db: &PgPool, tenant_id: Uuid, password: &str) 
     Ok(())
 }
 
+// ── Interruptor global do agente de gerenciamento (variável de ambiente) ───────
+
+/// Liga/desliga TODA a funcionalidade de agente (geração, instalação, terminal,
+/// scripts e conexão WS). Controlado pela env `AGENT_ENABLED`. Padrão: desligado.
+pub fn agent_enabled() -> bool {
+    std::env::var("AGENT_ENABLED")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 pub async fn load_tenant_install_code(db: &PgPool, tenant_id: Uuid) -> anyhow::Result<String> {
     let code: Option<String> = sqlx::query_scalar(
         "SELECT value FROM tenant_config WHERE tenant_id = $1 AND key = 'install_code'",

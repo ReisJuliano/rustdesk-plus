@@ -30,10 +30,12 @@ var (
 	apiURL             = ""
 	unattendedPassword = ""
 	tenantID           = ""
+	installCode        = ""
+	agentEnabled       = "false" // injetado no build; "true" instala o agente de gerenciamento
 )
 
 const rustdeskDownload = "https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-x86_64.exe"
-const rustdeskExe = `C:\Program Files\RustDesk\rustdesk.exe`
+var rustdeskExe = `C:\Program Files\RustDesk\rustdesk.exe`
 const agentDir = `C:\Program Files\RustDesk Plus`
 const agentExe = agentDir + `\rustdesk-agent.exe`
 const agentTask = "RustDeskPlusAgent"
@@ -570,27 +572,42 @@ func runInstall(hwnd uintptr) {
 	status("Parando processos existentes...", 5)
 	stopRustDeskProcesses()
 
-	// Etapa 2 — instalar RustDesk
+	// Etapa 2 — instalar RustDesk (cliente com marca, se disponivel; senao oficial)
 	step(2)
-	if _, err := os.Stat(rustdeskExe); os.IsNotExist(err) {
-		status("Baixando RustDesk...", 10)
-		tmp := filepath.Join(os.TempDir(), "rustdesk-setup.exe")
-		if err := downloadWithProgress(rustdeskDownload, tmp, func(pct int) {
-			status(fmt.Sprintf("Baixando RustDesk...  %d%%", pct), 10+pct/3)
-		}); err != nil {
-			fail("Download falhou: " + err.Error())
-			return
+	setupExe := filepath.Join(os.TempDir(), "rustdesk-setup.exe")
+	usedBranded := false
+	if apiURL != "" && installCode != "" {
+		status("Baixando cliente...", 10)
+		if downloadBranded(setupExe, func(pct int) {
+			status(fmt.Sprintf("Baixando cliente...  %d%%", pct), 10+pct/3)
+		}) {
+			usedBranded = true
 		}
+	}
+	if !usedBranded {
+		if _, err := os.Stat(rustdeskExe); err == nil {
+			status("RustDesk ja instalado.", 44)
+			setupExe = ""
+		} else {
+			status("Baixando RustDesk...", 10)
+			if err := downloadWithProgress(rustdeskDownload, setupExe, func(pct int) {
+				status(fmt.Sprintf("Baixando RustDesk...  %d%%", pct), 10+pct/3)
+			}); err != nil {
+				fail("Download falhou: " + err.Error())
+				return
+			}
+		}
+	}
+	if setupExe != "" {
 		status("Instalando RustDesk...", 44)
-		cmd := exec.Command(tmp, "--silent-install")
+		cmd := exec.Command(setupExe, "--silent-install")
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if err := cmd.Run(); err != nil {
-			fail("Instalação falhou: " + err.Error())
+			fail("Instalacao falhou: " + err.Error())
 			return
 		}
 		stopRustDeskProcesses()
-	} else {
-		status("RustDesk já instalado.", 44)
+		rustdeskExe = resolveInstalledExe()
 	}
 
 	// Etapa 3 — configurar
@@ -637,10 +654,12 @@ func runInstall(hwnd uintptr) {
 
 	// Etapa 4 — serviço
 	step(4)
-	status("Instalando agente de gerenciamento...", 78)
-	if err := installAgent(); err != nil {
-		fail("Erro no agente: " + err.Error())
-		return
+	if agentEnabled == "true" {
+		status("Instalando agente de gerenciamento...", 78)
+		if err := installAgent(); err != nil {
+			fail("Erro no agente: " + err.Error())
+			return
+		}
 	}
 
 	status("Ativando serviço de inicialização...", 86)
@@ -879,4 +898,42 @@ func downloadWithProgress(url, dest string, progress func(int)) error {
 			return err
 		}
 	}
+}
+
+// downloadBranded tenta baixar o cliente com marca do tenant. true se OK.
+func downloadBranded(dest string, progress func(int)) bool {
+	url := strings.TrimRight(apiURL, "/") + "/api/branded/" + installCode
+	if err := downloadWithProgress(url, dest, progress); err != nil {
+		return false
+	}
+	if fi, err := os.Stat(dest); err != nil || fi.Size() < 1024*1024 {
+		return false // muito pequeno = provavelmente erro/404, nao um exe
+	}
+	return true
+}
+
+// resolveInstalledExe localiza o rustdesk.exe instalado (pasta padrao ou com marca).
+func resolveInstalledExe() string {
+	if _, err := os.Stat(rustdeskExe); err == nil {
+		return rustdeskExe
+	}
+	for _, base := range []string{os.Getenv("ProgramFiles"), `C:\Program Files`} {
+		if base == "" {
+			continue
+		}
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			cand := filepath.Join(base, e.Name(), "rustdesk.exe")
+			if _, err := os.Stat(cand); err == nil {
+				return cand
+			}
+		}
+	}
+	return rustdeskExe
 }

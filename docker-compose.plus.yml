@@ -65,6 +65,14 @@ services:
       INSTALLER_PATH: /generated/rustdesk-installer.exe
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       PUBLIC_API_URL: ${PUBLIC_API_URL:-}
+      AGENT_ENABLED: ${AGENT_ENABLED:-false}
+      CLIENT_BUILDER_ENABLED: ${CLIENT_BUILDER_ENABLED:-false}
+      CLIENT_BUILDER_GH_REPO: ${CLIENT_BUILDER_GH_REPO:-}
+      CLIENT_BUILDER_GH_WORKFLOW: ${CLIENT_BUILDER_GH_WORKFLOW:-build-plain.yml}
+      CLIENT_BUILDER_GH_REF: ${CLIENT_BUILDER_GH_REF:-master}
+      CLIENT_BUILDER_GH_TOKEN: ${CLIENT_BUILDER_GH_TOKEN:-}
+      CLIENT_BUILDER_RUSTDESK_REF: ${CLIENT_BUILDER_RUSTDESK_REF:-1.3.9}
+      CLIENT_BUILDER_STORAGE: ${CLIENT_BUILDER_STORAGE:-local}
     volumes:
       - ./data/rustdesk:/rustdesk-data:ro
       - ./data/deployment:/deployment
