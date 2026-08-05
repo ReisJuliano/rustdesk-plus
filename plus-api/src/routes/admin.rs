@@ -913,6 +913,7 @@ async fn install_script(
         r#"# RustDesk Plus — Instalação automática
 # Execute com: irm "{api_url}/i/{code}" | iex
 $ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 If (-Not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{
     Write-Host "Solicitando permissão de administrador..." -ForegroundColor Yellow
     $arg = "-NoProfile -ExecutionPolicy Bypass -Command `"irm '{api_url}/i/{code}' | iex`""

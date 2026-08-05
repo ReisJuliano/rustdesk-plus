@@ -42,6 +42,7 @@ async fn main() {
         .expect("failed to synchronize server configuration");
     let state = AppState::new(db.clone());
 
+    tokio::spawn(builder::resume_pending(db.clone()));
     tokio::spawn(offline_sweeper(db));
 
     let app = Router::new()

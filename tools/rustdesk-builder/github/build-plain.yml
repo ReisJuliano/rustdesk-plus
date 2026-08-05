@@ -271,6 +271,14 @@ jobs:
           mkdir -p ./SignOutput
           mv ./target/release/rustdesk-portable-packer.exe "./SignOutput/${{ env.filename }}.exe"
 
+      - name: Set exe icon (rcedit)
+        if: inputs.icon_url != ''
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          choco install rcedit -y --no-progress
+          rcedit "./SignOutput/${{ env.filename }}.exe" --set-icon "./res/icon.ico"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

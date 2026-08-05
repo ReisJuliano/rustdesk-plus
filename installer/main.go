@@ -8,6 +8,7 @@ package main
 //     -o ..\rustdesk-installer.exe .
 
 import (
+	"context"
 	_ "embed"
 	"fmt"
 	"io"
@@ -600,15 +601,31 @@ func runInstall(hwnd uintptr) {
 	}
 	if setupExe != "" {
 		status("Instalando RustDesk...", 44)
-		cmd := exec.Command(setupExe, "--silent-install")
+		// Timeout: sem isso, um install travado congela a interface pra sempre.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		cmd := exec.CommandContext(ctx, setupExe, "--silent-install")
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		cancel()
+		if ctx.Err() == context.DeadlineExceeded {
+			fail("A instalacao demorou demais e foi cancelada. Feche o RustDesk se estiver aberto e tente novamente.")
+			return
+		}
+		if err != nil {
 			fail("Instalacao falhou: " + err.Error())
 			return
 		}
 		stopRustDeskProcesses()
 		rustdeskExe = resolveInstalledExe()
+		// O RustDesk registra o servico e chama helpers pelo nome fixo
+		// "RustDesk.exe". O build com marca renomeia o executavel, entao sem
+		// esta copia o servico aponta para um arquivo inexistente e nao sobe.
+		ensureCanonicalExe()
 	}
+
+	// O cliente Flutter depende do runtime VC++. Sem ele o executavel instalado
+	// falha com 0xc0000135 (DLL nao encontrada).
+	ensureVCRedist()
 
 	// Etapa 3 — configurar
 	step(3)
@@ -645,8 +662,22 @@ func runInstall(hwnd uintptr) {
 		return
 	}
 	if err := applyRustDeskOptions(); err != nil {
-		fail("Erro ao aplicar opções: " + err.Error())
-		return
+		// Tipicamente runtime ausente (0xc0000135): instala o VC++ e tenta de novo.
+		status("Instalando componentes do Windows...", 60)
+		installVCRedist()
+		if err2 := applyRustDeskOptions(); err2 != nil {
+			fail("Erro ao aplicar opções: " + err2.Error())
+			return
+		}
+	}
+
+	// A senha tem de ser definida PELO PROPRIO cliente (ele grava no formato
+	// interno dele) ANTES de propagar a config. O servico le o systemprofile —
+	// propagar antes deixava o servico com o valor escrito a mao no TOML, que o
+	// cliente nao aceita, resultando em "senha incorreta".
+	if unattendedPassword != "" {
+		status("Definindo senha de acesso remoto...", 68)
+		setRustDeskPasswordWithRetry(unattendedPassword)
 	}
 
 	status("Propagando configuração para o serviço...", 72)
@@ -665,12 +696,9 @@ func runInstall(hwnd uintptr) {
 	status("Ativando serviço de inicialização...", 86)
 	installRustDeskService()
 
-	if unattendedPassword != "" {
-		status("Aguardando serviço inicializar...", 90)
-		time.Sleep(4 * time.Second)
-		status("Definindo senha de acesso remoto...", 93)
-		setRustDeskPasswordWithRetry(unattendedPassword)
-	}
+	// Reinicia o servico para garantir que ele releia a config final (com a senha).
+	status("Reiniciando serviço...", 93)
+	restartRustDeskService()
 
 	status("Iniciando RustDesk...", 97)
 	exec.Command(rustdeskExe).Start()
@@ -720,6 +748,19 @@ func stopRustDeskProcesses() {
 	svcStop.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	svcStop.Run()
 	kill := exec.Command("taskkill", "/F", "/IM", "rustdesk.exe")
+	// O cliente com marca tem o nome do app (ex.: "Acme Remoto.exe"), nao
+	// "rustdesk.exe". Mata qualquer executavel da pasta de instalacao, senao o
+	// processo antigo segura os arquivos e o --silent-install trava.
+	if entries, err := os.ReadDir(filepath.Dir(rustdeskExe)); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".exe") {
+				continue
+			}
+			k := exec.Command("taskkill", "/F", "/IM", e.Name())
+			k.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			_ = k.Run()
+		}
+	}
 	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	kill.Run()
 	time.Sleep(1500 * time.Millisecond)
@@ -912,11 +953,18 @@ func downloadBranded(dest string, progress func(int)) bool {
 	return true
 }
 
-// resolveInstalledExe localiza o rustdesk.exe instalado (pasta padrao ou com marca).
+// resolveInstalledExe localiza o executavel instalado.
+// O cliente com marca mantem a pasta (C:\Program Files\RustDesk), o servico
+// (RustDesk) e a config (%APPDATA%\RustDesk) — mas o .exe e renomeado para
+// "<Nome do App>.exe". Por isso pegamos o maior .exe da pasta, ignorando helpers.
 func resolveInstalledExe() string {
 	if _, err := os.Stat(rustdeskExe); err == nil {
 		return rustdeskExe
 	}
+	if best := mainExeIn(filepath.Dir(rustdeskExe)); best != "" {
+		return best
+	}
+	// Fallback: pastas em Program Files cujo nome lembre rustdesk.
 	for _, base := range []string{os.Getenv("ProgramFiles"), `C:\Program Files`} {
 		if base == "" {
 			continue
@@ -926,14 +974,111 @@ func resolveInstalledExe() string {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() {
+			if !e.IsDir() || !strings.Contains(strings.ToLower(e.Name()), "rustdesk") {
 				continue
 			}
-			cand := filepath.Join(base, e.Name(), "rustdesk.exe")
-			if _, err := os.Stat(cand); err == nil {
-				return cand
+			if best := mainExeIn(filepath.Join(base, e.Name())); best != "" {
+				return best
 			}
 		}
 	}
 	return rustdeskExe
+}
+
+// mainExeIn devolve o maior .exe da pasta, ignorando helpers conhecidos.
+func mainExeIn(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	best, bestSize := "", int64(0)
+	for _, e := range entries {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".exe") {
+			continue
+		}
+		low := strings.ToLower(e.Name())
+		if strings.HasPrefix(low, "runtimebroker") || strings.Contains(low, "deviceinstaller") || strings.Contains(low, "usbmmidd") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.Size() > bestSize {
+			best, bestSize = filepath.Join(dir, e.Name()), info.Size()
+		}
+	}
+	return best
+}
+
+// vcRedistInstalled indica se o runtime VC++ x64 ja esta presente no sistema.
+func vcRedistInstalled() bool {
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		root = `C:\Windows`
+	}
+	for _, dll := range []string{"vcruntime140.dll", "msvcp140.dll"} {
+		if _, err := os.Stat(filepath.Join(root, "System32", dll)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureVCRedist instala o VC++ Redistributable se ainda nao estiver presente.
+func ensureVCRedist() {
+	if vcRedistInstalled() {
+		return
+	}
+	installVCRedist()
+}
+
+// installVCRedist baixa e instala o VC++ Redistributable x64 silenciosamente.
+func installVCRedist() {
+	tmp := filepath.Join(os.TempDir(), "vc_redist.x64.exe")
+	if err := downloadWithProgress("https://aka.ms/vs/17/release/vc_redist.x64.exe", tmp, func(int) {}); err != nil {
+		return
+	}
+	cmd := exec.Command(tmp, "/install", "/quiet", "/norestart")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Run()
+}
+
+// ensureCanonicalExe garante que exista um "RustDesk.exe" na pasta de instalacao.
+// O cliente com marca tem o executavel renomeado, mas o RustDesk registra o
+// servico como "RustDesk.exe" — sem essa copia o servico nao inicia (erro 2).
+func ensureCanonicalExe() {
+	if rustdeskExe == "" {
+		return
+	}
+	dir := filepath.Dir(rustdeskExe)
+	canonical := filepath.Join(dir, "RustDesk.exe")
+	if strings.EqualFold(filepath.Base(rustdeskExe), "RustDesk.exe") {
+		return
+	}
+	// Se ja existe e tem o mesmo tamanho, nao precisa recopiar.
+	src, err := os.Stat(rustdeskExe)
+	if err != nil {
+		return
+	}
+	if dst, err := os.Stat(canonical); err == nil && dst.Size() == src.Size() {
+		return
+	}
+	data, err := os.ReadFile(rustdeskExe)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(canonical, data, 0o755)
+}
+
+// restartRustDeskService reinicia o servico para que ele releia a config final
+// (servidor, key, api-server e senha) gravada durante a instalacao.
+func restartRustDeskService() {
+	stop := exec.Command("sc", "stop", "RustDesk")
+	stop.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = stop.Run()
+	time.Sleep(3 * time.Second)
+	start := exec.Command("sc", "start", "RustDesk")
+	start.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = start.Run()
 }

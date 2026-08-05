@@ -229,6 +229,17 @@ async fn run_build(
     .execute(db)
     .await?;
 
+    poll_and_store(db, tenant_id, cfg, run_id, artifact_name).await
+}
+
+/// Faz polling do run ate concluir, baixa o artifact e grava no storage.
+async fn poll_and_store(
+    db: &PgPool,
+    tenant_id: Uuid,
+    cfg: &BuilderConfig,
+    run_id: i64,
+    artifact_name: &str,
+) -> anyhow::Result<()> {
     // Polling ate ~90 min (180 x 30s).
     for _ in 0..180 {
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -254,4 +265,50 @@ async fn run_build(
         return Err(anyhow!("run concluido sem sucesso"));
     }
     Err(anyhow!("timeout aguardando o build"))
+}
+
+/// Retoma builds que ficaram em "queued"/"building" — o polling vive em memoria,
+/// entao um restart do plus-api deixaria o status preso para sempre.
+/// Chamado no boot (main.rs).
+pub async fn resume_pending(db: PgPool) {
+    if !enabled() {
+        return;
+    }
+    let cfg = match BuilderConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("resume_pending: config invalida: {e:?}");
+            return;
+        }
+    };
+    let rows: Vec<(Uuid, i64, String)> = match sqlx::query_as(
+        "SELECT tenant_id, build_run_id, file_name FROM tenant_branding \
+         WHERE build_status IN ('queued', 'building') AND build_run_id IS NOT NULL",
+    )
+    .fetch_all(&db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("resume_pending: query falhou: {e:?}");
+            return;
+        }
+    };
+    for (tenant_id, run_id, artifact_name) in rows {
+        tracing::info!("retomando polling do build do tenant {tenant_id} (run {run_id})");
+        let db2 = db.clone();
+        let cfg2 = cfg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = poll_and_store(&db2, tenant_id, &cfg2, run_id, &artifact_name).await {
+                tracing::warn!("retomada do build do tenant {tenant_id} falhou: {e:?}");
+                let _ = sqlx::query(
+                    "UPDATE tenant_branding SET build_status='failed', build_error=$2, updated_at=now() WHERE tenant_id=$1",
+                )
+                .bind(tenant_id)
+                .bind(e.to_string())
+                .execute(&db2)
+                .await;
+            }
+        });
+    }
 }

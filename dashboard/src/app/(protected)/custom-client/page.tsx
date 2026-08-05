@@ -6,8 +6,9 @@ import {
   saveBranding,
   uploadBrandingIcon,
   triggerBrandingBuild,
-  downloadBrandedClient,
   brandingIconUrl,
+  getServerConfig,
+  downloadInstaller,
   type TenantBranding,
 } from "@/lib/api";
 
@@ -38,9 +39,7 @@ function StatusBadge({ status }: { status: TenantBranding["build_status"] }) {
     failed: { label: "Falhou", cls: "bg-red-100 text-red-700" },
   };
   const s = map[status] ?? map.idle;
-  return (
-    <span className={`text-xs font-semibold rounded-full px-2.5 py-1 ${s.cls}`}>{s.label}</span>
-  );
+  return <span className={`text-xs font-semibold rounded-full px-2.5 py-1 ${s.cls}`}>{s.label}</span>;
 }
 
 export default function CustomClientPage() {
@@ -49,13 +48,16 @@ export default function CustomClientPage() {
   const [status, setStatus] = useState<TenantBranding["build_status"]>("idle");
   const [buildError, setBuildError] = useState<string | null>(null);
   const [hasIcon, setHasIcon] = useState(false);
+  const [iconFile, setIconFile] = useState<File | null>(null);
   const [savedIconUrl, setSavedIconUrl] = useState<string | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
-  const [iconFile, setIconFile] = useState<File | null>(null);
+  const [installCode, setInstallCode] = useState("");
+  const [apiBase, setApiBase] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [building, setBuilding] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -84,6 +86,12 @@ export default function CustomClientPage() {
 
   useEffect(() => {
     refresh().catch((e) => setError(e instanceof Error ? e.message : "Erro ao carregar"));
+    getServerConfig()
+      .then((c) => {
+        setInstallCode(c.install_code || "");
+        setApiBase((c.api_url || "").replace(/\/+$/, ""));
+      })
+      .catch(() => {});
   }, []);
 
   // Polling enquanto está compilando
@@ -97,7 +105,10 @@ export default function CustomClientPage() {
 
   // Preview do arquivo recem-selecionado (antes de salvar)
   useEffect(() => {
-    if (!iconFile) { setFilePreview(null); return; }
+    if (!iconFile) {
+      setFilePreview(null);
+      return;
+    }
     const url = URL.createObjectURL(iconFile);
     setFilePreview(url);
     return () => URL.revokeObjectURL(url);
@@ -107,19 +118,24 @@ export default function CustomClientPage() {
     setForm((f) => ({ ...f, [k]: v }));
   }
 
+  async function persist() {
+    await saveBranding(form);
+    if (iconFile) {
+      await uploadBrandingIcon(iconFile);
+      setIconFile(null);
+      if (fileRef.current) fileRef.current.value = "";
+      setHasIcon(true);
+    }
+  }
+
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
-      await saveBranding(form);
-      if (iconFile) {
-        await uploadBrandingIcon(iconFile);
-        setIconFile(null);
-        if (fileRef.current) fileRef.current.value = "";
-        setHasIcon(true);
-      }
+      await persist();
+      await refresh();
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
@@ -133,13 +149,7 @@ export default function CustomClientPage() {
     setBuilding(true);
     setError(null);
     try {
-      await saveBranding(form);
-      if (iconFile) {
-        await uploadBrandingIcon(iconFile);
-        setIconFile(null);
-        if (fileRef.current) fileRef.current.value = "";
-        setHasIcon(true);
-      }
+      await persist();
       await triggerBrandingBuild();
       setStatus("queued");
       setBuildError(null);
@@ -150,36 +160,50 @@ export default function CustomClientPage() {
     }
   }
 
-  async function onDownload() {
+  async function onDownloadInstaller() {
     setDownloading(true);
     setError(null);
     try {
-      const blob = await downloadBrandedClient();
+      const blob = await downloadInstaller();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${form.file_name || "rustdesk"}.exe`;
+      a.download = "instalador.exe";
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao baixar");
+      setError(err instanceof Error ? err.message : "Erro ao baixar o instalador");
     } finally {
       setDownloading(false);
     }
   }
 
-  if (enabled === null) {
-    return <div className="p-6 text-sm text-slate-400">Carregando…</div>;
+  // Prefixo de TLS 1.2: PowerShell antigo (Win 7/8/2012/2016) tenta TLS 1.0 e falha
+  // no HTTPS moderno. Não desabilita validação de certificado.
+  const installCmd =
+    apiBase && installCode
+      ? `[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm ${apiBase}/i/${installCode} | iex`
+      : "";
+
+  function copyCmd() {
+    if (!installCmd) return;
+    navigator.clipboard.writeText(installCmd).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   }
+
+  if (enabled === null) return <div className="p-6 text-sm text-slate-400">Carregando…</div>;
 
   if (!enabled) {
     return (
       <div className="p-6 max-w-2xl">
         <h1 className="text-xl font-semibold text-slate-800">Cliente Customizado</h1>
         <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-5 text-sm text-slate-600">
-          O gerador de cliente customizado está <strong>desabilitado</strong> neste servidor.
-          Para habilitar, configure <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">CLIENT_BUILDER_*</code>{" "}
-          no <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">.env</code> (repositório do builder + token do GitHub).
+          O gerador de cliente customizado está <strong>desabilitado</strong> neste servidor. Para
+          habilitar, configure{" "}
+          <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">CLIENT_BUILDER_*</code> no{" "}
+          <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">.env</code>.
         </div>
       </div>
     );
@@ -267,28 +291,50 @@ export default function CustomClientPage() {
         </div>
       </form>
 
-      <div className="rounded-2xl border border-slate-200 bg-white p-5">
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
         <div className="flex items-center justify-between gap-4">
           <div className="text-sm text-slate-600">
             {busy
               ? "O build roda no GitHub Actions (~30–45 min). Esta página atualiza sozinha."
               : status === "ready"
-              ? "Cliente com marca pronto para download."
+              ? "Cliente com marca pronto. Distribua pelo instalador abaixo."
               : "Gere o cliente com a marca acima. O build roda no GitHub Actions."}
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <button onClick={onBuild} disabled={building || busy}
-              className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
-              {building ? "Disparando…" : busy ? "Compilando…" : "Gerar cliente"}
+          <button onClick={onBuild} disabled={building || busy}
+            className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50 flex-shrink-0">
+            {building ? "Disparando…" : busy ? "Compilando…" : "Gerar cliente"}
+          </button>
+        </div>
+
+        {status === "ready" && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+            <p className="text-sm text-slate-700">
+              <strong>Instale pelo instalador.</strong> Ele baixa o cliente com a sua marca, aplica a{" "}
+              <strong>senha do tenant</strong> e registra o serviço — necessário para acesso
+              desassistido. O binário sozinho não tem a senha.
+            </p>
+            <button onClick={onDownloadInstaller} disabled={downloading}
+              className="rounded-xl bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50">
+              {downloading ? "Baixando…" : "Baixar instalador"}
             </button>
-            {status === "ready" && (
-              <button onClick={onDownload} disabled={downloading}
-                className="rounded-xl bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50">
-                {downloading ? "Baixando…" : "Baixar .exe"}
-              </button>
+            {installCmd && (
+              <div>
+                <label className="block text-xs font-medium text-slate-500">
+                  Ou instale por linha de comando (PowerShell como administrador)
+                </label>
+                <div className="mt-1 flex items-center gap-2">
+                  <code className="flex-1 min-w-0 truncate rounded-lg bg-slate-900 px-3 py-2 text-xs text-slate-100">
+                    {installCmd}
+                  </code>
+                  <button onClick={copyCmd}
+                    className="flex-shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-blue-600 hover:bg-blue-50">
+                    {copied ? "✓ Copiado" : "Copiar"}
+                  </button>
+                </div>
+              </div>
             )}
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
