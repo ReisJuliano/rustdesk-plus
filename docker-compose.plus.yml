@@ -21,11 +21,12 @@ services:
     build:
       context: .
       dockerfile: deploy/rustdesk-server/Dockerfile
-    command: ["/usr/local/bin/hbbr"]
+    command: ["/bin/sh", "-c", "set -o pipefail; /usr/local/bin/hbbr 2>&1 | tee -a /audit/hbbr.log"]
     restart: unless-stopped
     working_dir: /data
     volumes:
       - ./data/rustdesk:/data
+      - ./data/audit:/audit
     ports:
       - "21117:21117"
       - "21119:21119"
@@ -66,6 +67,8 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       PUBLIC_API_URL: ${PUBLIC_API_URL:-}
       AGENT_ENABLED: ${AGENT_ENABLED:-false}
+      # Optional relay-based connection audit (enabled by this Compose file).
+      RELAY_AUDIT_LOG: /audit/hbbr.log
       CLIENT_BUILDER_ENABLED: ${CLIENT_BUILDER_ENABLED:-false}
       CLIENT_BUILDER_GH_REPO: ${CLIENT_BUILDER_GH_REPO:-}
       CLIENT_BUILDER_GH_WORKFLOW: ${CLIENT_BUILDER_GH_WORKFLOW:-build-plain.yml}
@@ -77,6 +80,7 @@ services:
       - ./data/rustdesk:/rustdesk-data:ro
       - ./data/deployment:/deployment
       - ./data/generated:/generated
+      - ./data/audit:/audit:ro
     depends_on:
       postgres:
         condition: service_healthy
