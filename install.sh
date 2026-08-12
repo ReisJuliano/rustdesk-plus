@@ -90,7 +90,7 @@ CADDY_ADDR=$caddy_addr
 EOF
 fi
 
-mkdir -p data/rustdesk data/deployment data/generated plus-data/postgres
+mkdir -p data/rustdesk data/deployment data/generated data/audit plus-data/postgres
 
 public_host="$(sed -n 's/^PUBLIC_HOST=//p' .env | tail -n 1)"
 if [ -n "$public_host" ]; then

@@ -109,6 +109,24 @@ O gateway Caddy roteia:
 
 ## Instalação Rápida
 
+### Nova empresa — instalação limpa de produção
+
+Para entregar uma VPS exclusiva a uma nova empresa, use o instalador guiado. Ele
+exige uma máquina Ubuntu/Debian nova, um domínio já apontado para o IP público e
+recusa continuar se encontrar banco de dados existente.
+
+```bash
+git clone https://github.com/edsonfl1301/rustdesk-plus.git
+cd rustdesk-plus
+git checkout feat/connection-audit
+chmod +x install-production.sh deploy/operations/*.sh
+./install-production.sh
+```
+
+O fluxo configura Docker, segredos, HTTPS, firewall UFW, auditoria, rotação do
+log, backup diário e um diagnóstico final. Consulte o guia completo em
+[`docs/PRODUCTION_INSTALL.md`](docs/PRODUCTION_INSTALL.md).
+
 ### Pré-requisitos
 
 - Servidor Linux com Docker Engine e Docker Compose v2 (ou `docker-compose` standalone)
