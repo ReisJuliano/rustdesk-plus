@@ -88,6 +88,24 @@ export type Stats = {
   total_users: number;
 };
 
+export type ConnectionAudit = {
+  id: string;
+  target_rustdesk_id: string;
+  peer_rustdesk_id: string | null;
+  peer_name: string | null;
+  source_ip: string | null;
+  connection_type: number | null;
+  status: "launched" | "connecting" | "active" | "closed";
+  launched_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  hostname: string | null;
+  alias: string | null;
+  initiated_by_name: string | null;
+  initiated_by_email: string | null;
+};
+
 export type ServerConfig = {
   server_ip: string;
   server_key: string;
@@ -301,6 +319,21 @@ export async function toggleFavorite(id: string) {
 
 export async function getStats() {
   return request<Stats>("/admin/stats");
+}
+
+export async function registerConnectionLaunch(deviceId: string) {
+  return request<{ ok: boolean; audit_id: string }>(`/admin/devices/${deviceId}/connect`, {
+    method: "POST",
+  });
+}
+
+export async function listConnectionAudit(params: { search?: string; limit?: number; offset?: number } = {}) {
+  const query = new URLSearchParams();
+  if (params.search) query.set("search", params.search);
+  if (params.limit) query.set("limit", String(params.limit));
+  if (params.offset) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<ConnectionAudit[]>(`/admin/audit/connections${qs ? `?${qs}` : ""}`);
 }
 
 // ── Tags ──────────────────────────────────────────────────────────────────────
