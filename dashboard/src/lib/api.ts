@@ -264,6 +264,13 @@ export async function deleteUser(id: string) {
   return request<{ ok: boolean }>(`/admin/users/${id}`, { method: "DELETE" });
 }
 
+export async function resetUserPassword(id: string, password: string) {
+  return request<{ ok: boolean }>(`/admin/users/${id}/password`, {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+}
+
 // ── Devices ───────────────────────────────────────────────────────────────────
 
 export async function listDevices(filter: {

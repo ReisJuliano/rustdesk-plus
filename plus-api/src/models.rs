@@ -120,6 +120,11 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ResetUserPassword {
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PatchDevice {
     pub alias: Option<String>,
     pub description: Option<String>,

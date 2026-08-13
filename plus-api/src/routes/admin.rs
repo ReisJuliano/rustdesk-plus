@@ -18,7 +18,7 @@ use crate::{
     error::AppError,
     models::{
         Branch, CreateBranch, CreateTag, CreateTenant, CreateUser, Device, ExecRequest,
-        LoginRequest, PatchDevice, SaveServerConfig, SetDeviceBranch, Stats, Tag, Tenant, TenantBranding, User,
+        LoginRequest, PatchDevice, ResetUserPassword, SaveServerConfig, SetDeviceBranch, Stats, Tag, Tenant, TenantBranding, User,
     },
     state::{agent_key, AppState},
 };
@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/admin/login", post(login))
         .route("/admin/users", get(list_users).post(create_user))
         .route("/admin/users/:id", delete(delete_user))
+        .route("/admin/users/:id/password", post(reset_user_password))
         .route("/admin/branches", get(list_branches).post(create_branch))
         .route("/admin/branches/:id", delete(delete_branch))
         .route("/admin/devices", get(list_devices))
@@ -88,16 +89,21 @@ async fn login(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Super admin: tenant_id IS NULL
     // Outros usuários: UNIQUE(tenant_id, email) — localiza pelo email diretamente
-    let user = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE email = $1 ORDER BY (tenant_id IS NULL) DESC LIMIT 1",
+    let users = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE LOWER(email) = LOWER($1) ORDER BY (tenant_id IS NULL) DESC",
     )
     .bind(&body.email)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::Unauthorized)?;
+    .fetch_all(&state.db)
+    .await?;
 
-    if !verify_password(&body.password, &user.password_hash) {
-        return Err(AppError::Unauthorized);
+    let mut matches = users
+        .into_iter()
+        .filter(|candidate| verify_password(&body.password, &candidate.password_hash));
+    let user = matches.next().ok_or(AppError::Unauthorized)?;
+    if matches.next().is_some() {
+        return Err(AppError::BadRequest(
+            "email e senha correspondem a mais de um cliente; use credenciais diferentes".to_string(),
+        ));
     }
 
     let token = issue_token(user.id, &user.role, user.tenant_id)?;
@@ -263,6 +269,30 @@ async fn delete_user(
         .bind(tid)
         .execute(&state.db)
         .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn reset_user_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ResetUserPassword>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth.require_admin()?;
+    let tid = tenant_from_headers(&auth, &headers)?;
+    let password_hash = hash_password(&body.password)?;
+    let result = sqlx::query(
+        "UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3",
+    )
+    .bind(password_hash)
+    .bind(id)
+    .bind(tid)
+    .execute(&state.db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
