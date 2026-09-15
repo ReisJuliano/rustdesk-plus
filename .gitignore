@@ -17,6 +17,8 @@ out/
 *.sqlite3-journal
 data/
 plus-data/
+backups/
+installation-report.txt
 
 # Generated installers
 *.exe

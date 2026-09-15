@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   listBranches, listDevices, setDeviceBranch, toggleFavorite,
   deleteDevice, restoreDevice, purgeDevice, patchDevice, listTags, listDeviceTags, addDeviceTag, removeDeviceTag,
-  getAllDeviceTags, getServerConfig,
+  getAllDeviceTags, getServerConfig, registerConnectionLaunch,
   type Branch, type Device, type Tag, type DeviceTagRow,
 } from "@/lib/api";
 
@@ -18,9 +18,10 @@ function isNumericId(id: string) {
   return /^\d+$/.test(id.trim());
 }
 
-function connectDevice(id: string, password?: string) {
-  if (isNumericId(id)) {
-    const uri = password ? `rustdesk://${id}?password=${encodeURIComponent(password)}` : `rustdesk://${id}`;
+async function connectDevice(deviceId: string, rustdeskId: string, password?: string) {
+  if (isNumericId(rustdeskId)) {
+    try { await registerConnectionLaunch(deviceId); } catch { /* auditing must not block the connection */ }
+    const uri = password ? `rustdesk://${rustdeskId}?password=${encodeURIComponent(password)}` : `rustdesk://${rustdeskId}`;
     window.open(uri, "_blank");
   }
   // IDs não numéricos (agent:HOSTNAME) são placeholders temporários.
@@ -320,7 +321,7 @@ function DeviceModal({
             {device.favorite ? "Favorito" : "Favoritar"}
           </button>
           <button
-            onClick={() => connectDevice(device.rustdesk_id, password)}
+            onClick={() => connectDevice(device.id, device.rustdesk_id, password)}
             disabled={!isNumericId(device.rustdesk_id)}
             title={!isNumericId(device.rustdesk_id) ? "Aguardando ID do RustDesk..." : undefined}
             className="flex-1 bg-blue-600 hover:bg-blue-700 text-white rounded-xl px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -445,7 +446,7 @@ function DeviceCard({
       {/* Actions */}
       <div className="flex gap-2 px-3 pb-3 mt-3">
         <button
-          onClick={(e) => { e.stopPropagation(); connectDevice(device.rustdesk_id, password); }}
+          onClick={(e) => { e.stopPropagation(); connectDevice(device.id, device.rustdesk_id, password); }}
           disabled={!isNumericId(device.rustdesk_id)}
           title={!isNumericId(device.rustdesk_id) ? "Aguardando ID do RustDesk..." : undefined}
           className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-xl py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -767,7 +768,7 @@ export default function DevicesPage() {
                           <td className="px-4 py-2.5 text-xs text-slate-400">{fmtLastSeen(d.last_seen_at)}</td>
                           <td className="px-4 py-2.5">
                             <button
-                              onClick={(e) => { e.stopPropagation(); connectDevice(d.rustdesk_id, rdPassword); }}
+                              onClick={(e) => { e.stopPropagation(); connectDevice(d.id, d.rustdesk_id, rdPassword); }}
                               disabled={!isNumericId(d.rustdesk_id)}
                               title={!isNumericId(d.rustdesk_id) ? "Aguardando ID do RustDesk..." : undefined}
                               className="text-xs text-blue-600 hover:underline disabled:text-slate-300 disabled:cursor-not-allowed"

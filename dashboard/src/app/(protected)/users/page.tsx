@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { listUsers, createUser, deleteUser, type User } from "@/lib/api";
+import { listUsers, createUser, deleteUser, resetUserPassword, type User } from "@/lib/api";
 
 const ROLES = ["admin", "operator", "viewer"] as const;
 
@@ -17,6 +17,8 @@ export default function UsersPage() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ email: "", password: "", name: "", role: "operator" });
   const [saving, setSaving] = useState(false);
+  const [passwordUser, setPasswordUser] = useState<User | null>(null);
+  const [newPassword, setNewPassword] = useState("");
 
   async function load() {
     try {
@@ -56,6 +58,22 @@ export default function UsersPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "erro ao remover");
+    }
+  }
+
+  async function onResetPassword(e: React.FormEvent) {
+    e.preventDefault();
+    if (!passwordUser) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await resetUserPassword(passwordUser.id, newPassword);
+      setPasswordUser(null);
+      setNewPassword("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "erro ao redefinir senha");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -140,6 +158,32 @@ export default function UsersPage() {
         <div className="rounded-2xl bg-rose-50 border border-rose-100 px-4 py-3 text-sm text-rose-500">{error}</div>
       )}
 
+      {passwordUser && (
+        <form onSubmit={onResetPassword} className="bg-white rounded-2xl border border-blue-200 shadow-sm p-5">
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">Redefinir senha</h2>
+          <p className="text-sm text-slate-600 mb-4">{passwordUser.name} · {passwordUser.email}</p>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Nova senha</label>
+              <input
+                type="password"
+                required
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <button type="submit" disabled={saving} className="rounded-2xl px-4 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
+              {saving ? "Salvando..." : "Salvar nova senha"}
+            </button>
+            <button type="button" onClick={() => { setPasswordUser(null); setNewPassword(""); }} className="rounded-2xl px-4 py-2.5 text-sm text-slate-500 hover:bg-slate-100">
+              Cancelar
+            </button>
+          </div>
+        </form>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -163,6 +207,12 @@ export default function UsersPage() {
                 </td>
                 <td className="px-5 py-3 text-slate-400">{new Date(u.created_at).toLocaleDateString()}</td>
                 <td className="px-5 py-3 text-right">
+                  <button
+                    onClick={() => { setPasswordUser(u); setNewPassword(""); }}
+                    className="rounded-2xl text-xs text-blue-500 hover:text-blue-700 hover:bg-blue-50 px-2 py-1 transition-colors"
+                  >
+                    Redefinir senha
+                  </button>
                   <button
                     onClick={() => onDelete(u.id, u.email)}
                     className="rounded-2xl text-xs text-rose-400 hover:text-rose-600 hover:bg-rose-50 px-2 py-1 transition-colors"

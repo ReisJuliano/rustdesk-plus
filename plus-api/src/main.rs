@@ -5,6 +5,7 @@ mod db;
 mod error;
 mod installer;
 mod models;
+mod relay_audit;
 mod routes;
 mod state;
 
@@ -44,10 +45,16 @@ async fn main() {
 
     tokio::spawn(builder::resume_pending(db.clone()));
     tokio::spawn(offline_sweeper(db));
+    if let Ok(path) = std::env::var("RELAY_AUDIT_LOG") {
+        if !path.trim().is_empty() {
+            tokio::spawn(relay_audit::run(state.db.clone(), path));
+        }
+    }
 
     let app = Router::new()
         .route("/health", get(health))
         .merge(routes::admin::router())
+        .merge(routes::audit::router())
         .merge(routes::scripts::router())
         .merge(routes::client::router())
         .merge(routes::agent::router())

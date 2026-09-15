@@ -41,6 +41,7 @@ O RustDesk Plus é uma solução self-hosted multi-tenant que combina:
 | **Instalador por cliente** | Comando PowerShell de uma linha ou `.exe`, gerado com senha exclusiva por cliente |
 | **Senha de acesso remoto** | 8 chars A-Z0-9, gerada automaticamente por tenant, visível nas Configurações |
 | **Auto-registro de dispositivos** | PCs aparecem no painel automaticamente ao conectar ao servidor |
+| **Auditoria de conexões** | Registra operador, origem, destino, início, fim e duração das sessões que passam pelo relay |
 | **Auto-filial por IP** | Dispositivos na mesma rede herdam a filial automaticamente (por tenant) |
 | **Dashboard em tempo real** | Stats por cliente: dispositivos, online/offline, filiais, usuários |
 | **3 modos de visualização** | Grid / Lista / Compacto na página de Dispositivos |
@@ -107,6 +108,24 @@ O gateway Caddy roteia:
 ---
 
 ## Instalação Rápida
+
+### Nova empresa — instalação limpa de produção
+
+Para entregar uma VPS exclusiva a uma nova empresa, use o instalador guiado. Ele
+exige uma máquina Ubuntu/Debian nova, um domínio já apontado para o IP público e
+recusa continuar se encontrar banco de dados existente.
+
+```bash
+git clone https://github.com/edsonfl1301/rustdesk-plus.git
+cd rustdesk-plus
+git checkout feat/connection-audit
+chmod +x install-production.sh deploy/operations/*.sh
+./install-production.sh
+```
+
+O fluxo configura Docker, segredos, HTTPS, firewall UFW, auditoria, rotação do
+log, backup diário e um diagnóstico final. Consulte o guia completo em
+[`docs/PRODUCTION_INSTALL.md`](docs/PRODUCTION_INSTALL.md).
 
 ### Pré-requisitos
 
@@ -456,6 +475,41 @@ docker-compose up -d --build
 O banco de dados é atualizado automaticamente pelas migrations SQLx. Volumes (`plus-data/postgres`, `data/`) são preservados.
 
 ---
+
+## Auditoria de conexões
+
+A tela **Auditoria** combina duas fontes:
+
+1. O clique em **Conectar** no painel registra quem iniciou a sessão e o destino.
+2. O coletor interno acompanha o log do `hbbr`, identifica o par de IPs e grava o início e o encerramento reais da sessão.
+
+O `docker-compose.plus.yml` já habilita o coletor: o `hbbr` grava em
+`./data/audit/hbbr.log`, montado como somente leitura no `plus-api`. A migração
+`0010_connection_audit.sql` é aplicada automaticamente na inicialização.
+
+### Dados registrados
+
+- usuário do painel que clicou em **Conectar**;
+- ID, nome e IP do computador de origem, quando cadastrados;
+- dispositivo e ID RustDesk de destino;
+- horário real de início e encerramento no relay;
+- duração e estado atual da sessão.
+
+### Limitações
+
+- O coletor central enxerga somente conexões que passam pelo `hbbr`. Uma conexão
+  direta ponto a ponto não aparece no log do relay.
+- A associação usa os IPs informados pelos heartbeats. Em instalações atrás de
+  proxy reverso, preserve corretamente `X-Forwarded-For`/`X-Real-IP`; caso
+  contrário todos os dispositivos podem aparecer com o IP do proxy.
+- A sessão deve ser iniciada pelo botão do painel para que o usuário responsável
+  seja associado. Eventos nativos do cliente RustDesk também podem completar o
+  registro por `/t/<tenant_id>/api/audit/conn`.
+- O arquivo `data/audit/hbbr.log` cresce continuamente. Configure rotação de logs
+  no host de acordo com sua política de retenção.
+
+Para desabilitar o coletor, remova `RELAY_AUDIT_LOG` e o volume `/audit` do
+serviço `plus-api`; o restante do painel continua funcionando.
 
 ## Solução de Problemas
 
