@@ -7,17 +7,31 @@ COPY plus-api/migrations ./migrations
 RUN cargo build --release
 
 FROM golang:1.24-bookworm
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# Wine + Inno Setup: o cliente do RustDesk (Windows) é compilado a partir de um
+# .iss (ver installer/rustdesk-plus.iss) via ISCC, que só existe para Windows —
+# roda sob Wine dentro deste container Linux. xvfb porque o instalador do
+# próprio Inno Setup abre janelas mesmo em modo silencioso.
+RUN dpkg --add-architecture i386 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl xvfb wine wine32 \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG INNOSETUP_VERSION=6.3.3
+RUN curl -fsSL -o /tmp/innosetup.exe "https://files.jrsoftware.org/is/6/innosetup-${INNOSETUP_VERSION}.exe" \
+    && xvfb-run -a wine /tmp/innosetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="Z:\opt\innosetup" \
+    && rm -f /tmp/innosetup.exe
+
+ENV WINE_BIN=wine
+ENV ISCC_PATH=/opt/innosetup/ISCC.exe
 WORKDIR /app
 
 COPY --from=api-builder /app/target/release/plus-api ./plus-api
 COPY plus-api/migrations ./migrations
 
 COPY agent/go.mod agent/main.go ./build-src/agent/
-COPY installer/go.mod installer/main.go ./build-src/installer/
+COPY installer/rustdesk-plus.iss ./build-src/installer/rustdesk-plus.iss
 
 RUN cd /app/build-src/agent && go mod download \
-    && cd /app/build-src/installer && go mod download \
     && mkdir -p /app/generated
 
 ENV INSTALLER_SOURCE_DIR=/app/build-src

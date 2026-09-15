@@ -6,9 +6,14 @@ use std::{
 };
 use uuid::Uuid;
 
-// Bump este número ao mudar agent/main.go ou installer/main.go.
+// Bump este número ao mudar agent/main.go ou installer/rustdesk-plus.iss.
 // Todos os agentes já instalados se auto-atualizarão ao detectar a divergência.
-pub const INSTALLER_BUILD: &str = "15";
+pub const INSTALLER_BUILD: &str = "16";
+
+const RUSTDESK_VERSION: &str = "1.3.9";
+const RUSTDESK_URL: &str =
+    "https://github.com/rustdesk/rustdesk/releases/download/1.3.9/rustdesk-1.3.9-x86_64.exe";
+const VCREDIST_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
 
 fn run(command: &mut Command, description: &str) -> anyhow::Result<()> {
     let output = command.output()?;
@@ -16,7 +21,8 @@ fn run(command: &mut Command, description: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "{description} falhou: {}",
+        "{description} falhou: {}{}",
+        String::from_utf8_lossy(&output.stdout).trim(),
         String::from_utf8_lossy(&output.stderr).trim()
     )
 }
@@ -39,6 +45,56 @@ fn generated_dir() -> PathBuf {
 /// Caminho do binário do agente para o tenant (salvo ao lado do installer).
 pub fn agent_binary_path(tenant_id: Uuid) -> PathBuf {
     generated_dir().join(format!("agent-{tenant_id}.exe"))
+}
+
+fn cache_dir() -> PathBuf {
+    generated_dir().join("cache")
+}
+
+fn download_to(url: &str, dest: &Path) -> anyhow::Result<()> {
+    let bytes = reqwest::blocking::get(url)?.error_for_status()?.bytes()?;
+    fs::write(dest, &bytes)?;
+    Ok(())
+}
+
+/// Baixa (uma única vez, ficam em cache) os binários oficiais que o instalador
+/// empacota. Empacotar em vez de baixar em tempo de instalação evita depender
+/// da rede do PC de destino e reduz o padrão "baixa e executa" que antivírus
+/// heurísticos costumam sinalizar.
+fn cached_rustdesk_setup() -> anyhow::Result<PathBuf> {
+    let dir = cache_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("rustdesk-{RUSTDESK_VERSION}-setup.exe"));
+    if !path.exists() {
+        download_to(RUSTDESK_URL, &path)?;
+    }
+    Ok(path)
+}
+
+fn cached_vcredist() -> anyhow::Result<PathBuf> {
+    let dir = cache_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("vc_redist.x64.exe");
+    if !path.exists() {
+        download_to(VCREDIST_URL, &path)?;
+    }
+    Ok(path)
+}
+
+/// Monta o comando do compilador do Inno Setup (ISCC). Em produção o plus-api
+/// roda em container Linux, então ISCC.exe precisa do Wine — configurável via
+/// ISCC_BIN (comando completo) ou WINE_BIN + ISCC_PATH (padrão: wine +
+/// /opt/innosetup/ISCC.exe). Em Windows nativo (dev), usa ISCC.exe direto.
+fn iscc_command() -> Command {
+    if let Ok(bin) = std::env::var("ISCC_BIN") {
+        return Command::new(bin);
+    }
+    if cfg!(target_os = "windows") {
+        return Command::new("ISCC.exe");
+    }
+    let mut cmd = Command::new(std::env::var("WINE_BIN").unwrap_or_else(|_| "wine".to_string()));
+    cmd.arg(std::env::var("ISCC_PATH").unwrap_or_else(|_| "/opt/innosetup/ISCC.exe".to_string()));
+    cmd
 }
 
 pub fn build(
@@ -81,24 +137,18 @@ pub fn build(
     }
 
     let source_root = PathBuf::from(
-        std::env::var("INSTALLER_SOURCE_DIR")
-            .unwrap_or_else(|_| "/app/build-src".to_string()),
+        std::env::var("INSTALLER_SOURCE_DIR").unwrap_or_else(|_| "/app/build-src".to_string()),
     );
     let work_root = std::env::temp_dir().join(format!("rustdesk-plus-{}", Uuid::new_v4()));
     let agent_dir = work_root.join("agent");
-    let installer_dir = work_root.join("installer");
     fs::create_dir_all(&agent_dir)?;
-    fs::create_dir_all(&installer_dir)?;
+    fs::create_dir_all(&work_root)?;
 
     for file in ["go.mod", "main.go"] {
         copy_file(source_root.join("agent").join(file), agent_dir.join(file))?;
-        copy_file(
-            source_root.join("installer").join(file),
-            installer_dir.join(file),
-        )?;
     }
 
-    let agent_exe = installer_dir.join("rustdesk-agent.exe");
+    let agent_exe = work_root.join("rustdesk-agent.exe");
     if agent_on {
         run(
             Command::new("go")
@@ -127,36 +177,36 @@ pub fn build(
         fs::create_dir_all(&generated_dir)?;
         fs::copy(&agent_exe, &agent_path)?;
     } else {
-        // Agente desligado: placeholder vazio só para o //go:embed do instalador
-        // compilar. O instalador não o instalará (flag main.agentEnabled=false).
+        // Agente desligado: placeholder vazio; o .iss só inclui esse Source
+        // quando AgentEnabled=="true" (via #if), então o arquivo nunca é usado.
         fs::write(&agent_exe, [])?;
         let _ = fs::remove_file(&agent_path);
     }
 
+    let rustdesk_setup = cached_rustdesk_setup()?;
+    let vc_redist = cached_vcredist()?;
+    let iss_path = source_root.join("installer").join("rustdesk-plus.iss");
+    let output_basename = format!("installer-{tenant_id}");
+
     run(
-        Command::new("go")
-            .current_dir(&installer_dir)
-            .args(["mod", "tidy"]),
-        "preparação das dependências do instalador",
+        iscc_command()
+            .arg(format!("/DServerIP={}", config.server_ip))
+            .arg(format!("/DServerKey={}", config.server_key))
+            .arg(format!("/DApiUrl={}", config.api_url))
+            .arg(format!("/DTenantID={tenant_id}"))
+            .arg(format!("/DInstallCode={install_code}"))
+            .arg(format!("/DUnattendedPassword={rustdesk_password}"))
+            .arg(format!("/DAgentEnabled={agent_on}"))
+            .arg(format!("/DRustdeskSetupPath={}", rustdesk_setup.display()))
+            .arg(format!("/DVCRedistPath={}", vc_redist.display()))
+            .arg(format!("/DAgentExePath={}", agent_exe.display()))
+            .arg(format!("/O{}", work_root.display()))
+            .arg(format!("/F{output_basename}"))
+            .arg(&iss_path),
+        "compilação do instalador (Inno Setup)",
     )?;
 
-    let installer_ldflags = format!(
-        "-s -w -H=windowsgui -X main.serverIP={} -X main.serverKey={} -X main.apiURL={} -X main.unattendedPassword={} -X main.tenantID={} -X main.installCode={} -X main.agentEnabled={}",
-        config.server_ip, config.server_key, config.api_url, rustdesk_password, tenant_id, install_code, agent_on
-    );
-    let temporary_output = work_root.join("rustdesk-installer.exe");
-    run(
-        Command::new("go")
-            .current_dir(&installer_dir)
-            .env("CGO_ENABLED", "0")
-            .env("GOOS", "windows")
-            .env("GOARCH", "amd64")
-            .args(["build", "-trimpath", "-ldflags", &installer_ldflags, "-o"])
-            .arg(&temporary_output)
-            .arg("."),
-        "build do instalador",
-    )?;
-
+    let temporary_output = work_root.join(format!("{output_basename}.exe"));
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
