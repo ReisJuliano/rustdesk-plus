@@ -530,14 +530,32 @@ type Filter = "all" | "online" | "offline" | "favorites";
 type SortKey = "name" | "status" | "last_seen" | "branch";
 type ViewMode = "grid" | "list" | "compact";
 
+const PREFS_KEY = "rdplus:devices:prefs";
+
+function loadPrefs(): { sortKey: SortKey; viewMode: ViewMode } {
+  const fallback: { sortKey: SortKey; viewMode: ViewMode } = { sortKey: "status", viewMode: "grid" };
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(PREFS_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return {
+      sortKey: (["name", "status", "last_seen", "branch"] as SortKey[]).includes(parsed.sortKey) ? parsed.sortKey : fallback.sortKey,
+      viewMode: (["grid", "list", "compact"] as ViewMode[]).includes(parsed.viewMode) ? parsed.viewMode : fallback.viewMode,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export default function DevicesPage() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [search, setSearch] = useState("");
   const [branchFilter, setBranchFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<Filter>("all");
-  const [sortKey, setSortKey] = useState<SortKey>("status");
-  const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [sortKey, setSortKey] = useState<SortKey>(() => loadPrefs().sortKey);
+  const [viewMode, setViewMode] = useState<ViewMode>(() => loadPrefs().viewMode);
   const [selected, setSelected] = useState<Device | null>(null);
   const [deviceTagMap, setDeviceTagMap] = useState<Map<string, Tag[]>>(new Map());
   const [error, setError] = useState<string | null>(null);
@@ -588,6 +606,12 @@ export default function DevicesPage() {
   useEffect(() => {
     getServerConfig().then((cfg) => setRdPassword(cfg.rustdesk_password ?? "")).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ sortKey, viewMode }));
+    } catch { /* localStorage indisponível (modo privado etc.) — ignora */ }
+  }, [sortKey, viewMode]);
 
   useEffect(() => {
     load();
